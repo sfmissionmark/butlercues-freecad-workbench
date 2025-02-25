@@ -27,8 +27,6 @@ import materials
 
 
 def inchToMM(num):
-    if type(num) == str:
-        num = float(num.split()[0])
     try:
         if isinstance(num, str):
             num = float(num.split()[0])
@@ -36,16 +34,14 @@ def inchToMM(num):
             num = float(num)
         return round(num * 25.4, 2)
     except (ValueError, TypeError) as e:
-        raise ValueError(f"Error converting {num} to millimeters: {e}")
+        raise ValueError(f"Error converting '{num}' to millimeters: {e}")
 
 
 class CueComponentManager:
     doc = App.activeDocument()
     _objects = []
     def __init__(self):
-        if not App.activeDocument():
-            self.doc = App.newDocument("Cue")
-        self.doc = App.activeDocument()
+        self.doc = App.activeDocument() or App.newDocument("Cue")
 
         if not self.doc.getObject("CueDimensions"):
             var_set_name = "CueDimensions"
