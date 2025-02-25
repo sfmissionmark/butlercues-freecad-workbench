@@ -14,7 +14,6 @@ __date__ = "2025"
 import FreeCAD as App
 import Part
 import Sketcher
-import common
 import FreeCADGui as Gui
 import dimensions
 from pivy import coin
@@ -125,6 +124,7 @@ def set_wood(image_name="Amboyna", optional_parts=None):
     if optional_parts is None:
         optional_parts = parts_to_color()
     for iObj in optional_parts:
+        print(f"Setting wood {image_name} texture for {iObj.Name}")
         remove_texture(iObj)
         rootnode = iObj.ViewObject.RootNode
         
@@ -142,7 +142,6 @@ def set_wood(image_name="Amboyna", optional_parts=None):
         transform = coin.SoTexture2Transform()
         transform.scaleFactor.setValue(1, 1)  # Adjust scale factors as needed
         rootnode.insertChild(transform, 2)
-
 
         SoPickStyle = coin.SoPickStyle()
 
@@ -195,5 +194,3 @@ def remove_texture(obj):
 
 
 
-
-print("hello")

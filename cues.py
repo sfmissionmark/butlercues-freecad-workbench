@@ -1,9 +1,8 @@
 import FreeCAD
 import FreeCADGui
-from common import *
 from dimensions import *
 import materials
-import part
+import components
 import inlays
 
 class FC_CueCommand:
@@ -24,7 +23,7 @@ class FC_CueCommand:
         return resources
 
     def Activated(self):
-        part.cue_part(self.part_name)
+        components.CueComponent(self.part_name)
 
     def IsActive(self):
         return True
@@ -128,8 +127,6 @@ class UpdatePreviewInlaysCommand:
 FreeCADGui.addCommand("Update Inlays", UpdatePreviewInlaysCommand())
 
 
-
-
 # Full Cue command
 class FC_FullCue:
     def GetResources(self):
@@ -147,7 +144,8 @@ class FC_FullCue:
             "butt_cap"
         ]
         for part_name in full_cue_parts:
-            part.cue_part(part_name)
+            components.CueComponent(part_name)
+            # part.cue_part(part_name)
 
         FreeCADGui.SendMsgToActiveView("ViewFit")
         

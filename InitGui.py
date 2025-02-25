@@ -12,9 +12,7 @@ class MyWorkbench (Workbench):
 
     MenuText = "Cues"
     ToolTip = "A description of my workbench"
-    Icon = "/resources/icons/bcwb.png"
-    print("Loading Workbench")
-    print(Icon)
+    Icon = os.path.expanduser("~/Library/Application Support/FreeCAD/Mod/ButlerCues/resources/icons/bcwb.png")
 
     def Initialize(self):
         """This function is executed when the workbench is first activated.
@@ -48,9 +46,8 @@ class MyWorkbench (Workbench):
         self.appendMenu("Woods", "Restore Wood")
 
         self.appendMenu("Inlays", []) # creates a new menu
-        for i in ["handle", "forearm", "butt_sleeve"]:
+        for i in ["forearm", "handle", "butt_sleeve"]:
             self.appendMenu("Inlays", f"{i}_inlay")
-        self.appendMenu("Inlays", "Update Inlays")
 
         return
 

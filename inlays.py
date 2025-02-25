@@ -7,13 +7,11 @@ FreeCAD workbench module for ButlerCues
 """
 
 import FreeCAD as App
-import Part
 import FreeCADGui as Gui
 import Draft
-import Sketcher
+from BOPTools import BOPFeatures
 
 import materials
-import part
 import sketchershapes
 
 
@@ -30,14 +28,14 @@ def create_inlay_document(inlay_type):
     """Create a new document for the specified inlay type"""
     doc = App.ActiveDocument
     doc_name = f"{inlay_type}_inlay"
+    part_object = doc.getObject("handle_part")
 
     if not doc_name in App.listDocuments().keys():
         new_document(doc_name, inlay_type)
 
     Gui.setActiveDocument(doc)
 
-    insert(inlay_type)
-    offset_and_trim(inlay_type)
+    i(inlay_type)
 
 
 
@@ -49,10 +47,9 @@ def new_document(doc_name, inlay_type):
         #create a Body and Sketch
         body = doc.addObject('PartDesign::Body', f"{inlay_type}_body")
         sketch = body.newObject('Sketcher::SketchObject', f"{inlay_type}_sketch")
-        sketch.ViewObject.Visibility = False
 
         if inlay_type == 'handle':
-            sketchershapes.diamond(sketch, 0.5, 2)
+            sketchershapes.rectangle(sketch, 0.5, 2)
         elif inlay_type == 'forearm':
             sketchershapes.triangle(sketch)
         elif inlay_type == 'butt_sleeve':
@@ -63,171 +60,121 @@ def new_document(doc_name, inlay_type):
         sketchershapes.pad_sketch(sketch, 0.2)
 
 
-def insert(inlay_type = "forearm"):
-    """Insert an inlay of specified type ('handle', 'forearm', 'butt_sleeve)"""
-    Gui.SendMsgToActiveView("Save")
+def draw_stock(cue_document_name = "Unnamed", 
+               inlay_document_name = "butt_sleeve_inlay"):
+    ############################################################################### 
+    # Draw stock for inlay in inlay document possibly can use for gcode later
+    ###############################################################################
+    cue_document = App.getDocument(cue_document_name)
+    var_set = cue_document.getObject("CueDimensions")
+    inlay_document = App.getDocument(inlay_document_name)
+
+    part_name = inlay_document_name.strip("_inlay")
+    height = getattr(var_set, f'{part_name}_length').Value / 25.4  # Convert mm to inches
+    width = getattr(var_set, f'{part_name}_od').Value / 25.4  # Convert mm to inches
+
+    inlay_document.addObject('PartDesign::Body','Pocket')
+    inlay_document.getObject('Pocket').newObject('Sketcher::SketchObject','stock_sketch')
+    sketch = inlay_document.getObject('stock_sketch')
+    sketch.AttachmentSupport = (inlay_document.getObject('XY_Plane001'),[''])
+    sketch.MapMode = 'FlatFace'
+
+    sketchershapes.rectangle(sketch, width, height, 0)
     
+    inlay_document.getObject('Pocket').newObject('PartDesign::Pad','stock_pad')
+    stock_pad = inlay_document.getObject('stock_pad')
+    stock_pad.Profile = (sketch, ['',])
+    stock_pad.Length = .25 * 25.4
+    stock_pad.TaperAngle = 0.000000
+    stock_pad.UseCustomVector = 0
+    stock_pad.Direction = (0, 0, 1)
+    stock_pad.ReferenceAxis = (sketch, ['N_Axis'])
+    stock_pad.AlongSketchNormal = 1
+    stock_pad.Reversed = 1
+    sketch.Visibility = False
+
+    # inlay_document.purgeTouched()
+    inlay_document.recompute()
+
+    
+
+
+def i(inlay_type = "handle"):
+    Gui.SendMsgToActiveView("Save")
     if inlay_type not in ['handle', 'forearm', 'butt_sleeve']:
         print(f"Invalid inlay type: {inlay_type}")
         return
-        
+
     source_name = f"{inlay_type}_inlay"
     link_name = f"linked_{inlay_type}_Inlay"
-    part_name = f"{inlay_type}_part"
-    datum_name = f"{inlay_type}_end_datumpoint"
-    constraint_name = f"{inlay_type}001"
-    od_param = f"{inlay_type}_od"
-    
+    group_name = f"{inlay_type}_group"
+
     source_doc = App.getDocument(source_name)
     target_doc = App.activeDocument()
 
-    if not source_doc and target_doc:
-        raise ValueError("Source or target document not found.")
+    # Make group for inlay component
+    component_group = target_doc.getObject('CueComponents')
+    group = target_doc.addObject('App::DocumentObjectGroup',group_name)
+    group.Label = group_name.replace('_', ' ').title()
+    component_group.addObject(target_doc.getObject(group_name))
 
-    source_object = find_object_by_label(source_doc, f"{inlay_type}_body")#'final_inlay')
+    # Move group into component group
+    object_names = [obj.Name for obj in component_group.Group]
+    # Find the indices of "handle" and "handle_group"
+    index_handle = object_names.index(inlay_type)
+    index_handle_group = object_names.index(group_name)
+    # Reorder: Remove "inlay_group" and reinsert it after "inlay"
+    if index_handle_group != index_handle + 1:
+        handle_group_obj = component_group.Group[index_handle_group]
+        component_group.removeObject(handle_group_obj)  # Remove "handle_group"
+        component_group.addObject(handle_group_obj)     # Add it back at the end
+        reordered_list = component_group.Group[:index_handle + 1] + [handle_group_obj] + component_group.Group[index_handle + 1:-1]
+        component_group.Group = reordered_list
+    target_doc.getObject(group_name).addObject(target_doc.getObject(inlay_type))
+
+    # create link to inlay object and move to group
+    source_object = find_object_by_label(source_doc, 'final_inlay')
     if not source_object:
-        raise ValueError(f"Inlay object not found in {source_name}. This needs to be named {inlay_type}_body.")
-
-    part_folder = target_doc.getObject(part_name)
-    new_group = target_doc.addObject("App::DocumentObjectGroup", f"{inlay_type}_inlay")
-    part_folder.addObject(new_group)
-
+        source_object = source_doc.getObject(f'{inlay_type}_pad')
     target_doc.addObject('App::Link', link_name).LinkedObject = source_object
-    new_group.addObject(target_doc.getObject(link_name))
-    linked_obj = target_doc.getObject(link_name)
-    linked_obj.Placement = App.Placement(App.Vector(0, 0, 0), App.Rotation(App.Vector(0,0,1), 90))
-    linked_obj.setExpression('.Placement.Base.x', f'{datum_name}.Placement.Base.x')
-    linked_obj.setExpression('.Placement.Base.z', f'{constraint_name}.Constraints.{od_param}')
+    target_doc.getObject(group_name).addObject(target_doc.getObject(link_name))
 
-    array = Draft.make_polar_array(linked_obj, number=4, angle=360.0, center=App.Vector(0.0, 0.0, 0.0), use_link=True)
+    # Position object to part
+    lnk = target_doc.getObject(link_name)
+    lnk.Placement = App.Placement(App.Vector(0, 0, 0), App.Rotation(App.Vector(0,0,1), 180))
+    lnk.setExpression('.Placement.Base.y', f'.Placement.Base.x + {inlay_type}.Placement.Base.y + {inlay_type}.Height')
+    lnk.setExpression('.Placement.Base.z', f'{inlay_type}.Radius2')
+
+    # Create array of inlays
+    array = Draft.make_polar_array(lnk, number=4, angle=360.0, center=App.Vector(0.0, 0.0, 0.0), use_link=True)
     array.Fuse = False
     Draft.autogroup(array)
-    array.Axis = (1, 0, 0)
+    array.Axis = (0, 1, 0)
     array.Label = f"{inlay_type}_inlay_array"
-    new_group.addObject(array)
-
+    target_doc.getObject(group_name).addObject(array) # cant seem to add name
     target_doc.recompute()
 
+    # create cut component
+    obj = target_doc.getObject(inlay_type)
+    texture = None
+    if "Texture_URL" in obj.PropertiesList:
+        texture = obj.Texture_URL
+    cut_obj = target_doc.addObject("Part::Cut", f"{inlay_type} with inlay cuts")
+    cut_obj.Tool = array
+    cut_obj.Base = target_doc.getObject(inlay_type)
+    if texture:
+        cut_obj.addProperty("App::PropertyString", "Texture_URL", "Texture", "Texture URL or HDD local path.")
+        cut_obj.Texture_URL = texture
+        materials.restore_wood()
+    target_doc.getObject(group_name).addObject(cut_obj)
 
+    # create preview inlay
+    cut_obj = target_doc.addObject("Part::Common", f"{inlay_type} inlay previews")
+    cut_obj.Tool = array
+    cut_obj.Base = target_doc.getObject(inlay_type)
+    target_doc.getObject(group_name).addObject(cut_obj)
 
-
-def offset_and_trim(part_name='forearm'):
-    doc = App.activeDocument()
-
-    # Create preview_inlays group if it doesn't exist
-    preview_group = doc.getObject('preview_inlays')
-    if not preview_group:
-        preview_group = doc.addObject("App::DocumentObjectGroup", "preview_inlays")
-
-    start_od = doc.getObject('CueDimensions').finish_size_startod
-    end_od = doc.getObject('CueDimensions').finish_size_endod
-    offset = App.Units.Quantity('0.008 in')
-    doc.getObject('CueDimensions').finish_size_startod = start_od + offset
-    doc.getObject('CueDimensions').finish_size_endod = end_od + offset
-    App.ActiveDocument.recompute()
-    
-    part = find_object_by_label(doc, f"{part_name}_part")
-    part_solid_name = f"{part_name}_part_solid"
-    __s__=part.Shape.Faces
-    __s__=Part.Solid(Part.Shell(__s__))
-    __o__=App.ActiveDocument.addObject("Part::Feature", part_solid_name)
-    __o__.Label=part_solid_name
-    __o__.Shape=__s__
-    preview_group.addObject(__o__)
-
-    inlay = find_object_by_label(doc, f"{part_name}_inlay_array")
-    inlay_solid_name = f"{part_name}_inlay_solid"
-    __s__=inlay.Shape.Faces
-    __s__=Part.Solid(Part.Shell(__s__))
-    __o__=App.ActiveDocument.addObject("Part::Feature", inlay_solid_name)
-    __o__.Label=inlay_solid_name
-    __o__.Shape=__s__
-    preview_group.addObject(__o__)
-
-    from BOPTools import BOPFeatures
-    bp = BOPFeatures.BOPFeatures(App.activeDocument())
-    common = bp.make_multi_common([part_solid_name, inlay_solid_name, ])
-    common.Label = f"{part_name}_inlay_common"
-    preview_group.addObject(common)
-    inlay.Visibility = False
-
-    materials.setMaterial(optional_parts=[common])
-    doc.getObject('CueDimensions').finish_size_startod = start_od
-    doc.getObject('CueDimensions').finish_size_endod = end_od
-
-    App.ActiveDocument.recompute()
-
-
-
-def update_all_previews():
-
-    doc = App.ActiveDocument
-    group = doc.getObject("preview_inlays")
-
-    if group:
-        # Recursively delete children
-        for child in group.Group:
-            App.ActiveDocument.removeObject(child.Name)
-
-        for obj in App.ActiveDocument.Objects:
-            if "_solid" in obj.Label.lower():
-                App.ActiveDocument.removeObject(obj.Name)
-
-    group = doc.getObject("inlays")
-    if group:
-        for child in group.Group:
-            offset_and_trim(child.Name.strip("_inlay"))
-
-
-
-def getTopSurface(object_name = "Fusion"):
-    # Get the active document and the Pad object
-    doc = App.ActiveDocument
-    pad = doc.getObject(object_name)  # Replace "Pad" with the actual name of your pad
-
-    # Access the shape of the Pad
-    shape = pad.Shape
-
-    # Define a tolerance for detecting the "top" face (change as needed)
-    z_tolerance = 0.01
-    top_faces = []
-
-    # Find the maximum Z value among the faces
-    max_z = max(face.BoundBox.Center.z for face in shape.Faces)
-
-    # Select faces close to the maximum Z value
-    for face in shape.Faces:
-        if abs(face.BoundBox.Center.z - max_z) < z_tolerance:
-            top_faces.append(face)
-
-    # Combine the top faces into a single compound shape
-    if top_faces:
-        compound = Part.Compound(top_faces)
-
-        # Create a refined face from the compound
-        refined_face = compound.Faces[0]
-        for face in compound.Faces[1:]:
-            refined_face = refined_face.fuse(face)
-
-        # Add the compound shape to the document
-        compound_obj = doc.addObject("Part::Feature", "TopFaces")
-        compound_obj.Label = "Top Faces"
-        # Replace the compound with the simplified face
-        compound_obj.Shape = refined_face
-        upgraded_obj = Draft.upgrade([compound_obj])[0]
-
-        # Convert the upgraded object to a sketch
-        sketch = Draft.makeSketch(upgraded_obj, autoconstraints=True)
-        sketch.Label = "TopFaceSketch"
-
-        # Recompute the document to reflect the changes
-        doc.recompute()
-
-        print("Top faces extracted and filleted successfully.")
-    else:
-        print("No top faces found.")
-
-    return upgraded_obj
+    target_doc.recompute()
 
 
 
@@ -263,7 +210,14 @@ def fillet_for_cnc(selected_object = None, fillet_radius_inch = 0.014):
         return
 
     # Apply fillet
-    fillet = shape.makeFillet(fillet_radius, [shape.Edges[i - 1] for i in edge_indices])
+    # fillet = shape.makeFillet(fillet_radius, [shape.Edges[i - 1] for i in edge_indices])
+    try:
+        edges_to_fillet = [shape.Edges[i - 1] for i in edge_indices]
+        fillet = shape.makeFillet(fillet_radius, edges_to_fillet)
+    except Exception as e:
+        print(f"Failed to create fillet: {str(e)}")
+        return
+
 
     # Hide the original object
     obj.Visibility = False
@@ -284,29 +238,3 @@ def prepare_for_inlay():
         return
     fillet_for_cnc(selection[0])
 
-
-
-def insert_sketch_link(inlay_type = "forearm"):
-    doc = App.ActiveDocument
-    link_name = f'{inlay_type}_sketch'
-    datum_name = f'{inlay_type}_end_datumpoint'
-    part_name = f'{inlay_type}_part'
-    constraint_name = f'{inlay_type}001'
-    od_param = f'{inlay_type}_od'
-
-    doc.addObject('App::Link', link_name).setLink(App.getDocument(f"{inlay_type}_inlay").forearm_body)
-    linked_obj = doc.getObject(link_name)
-    linked_obj.Placement = App.Placement(App.Vector(0, 0, 0), App.Rotation(App.Vector(0,0,1), 180))
-    linked_obj.setExpression('.Placement.Base.y', f'{datum_name}.Placement.Base.x + {part_name}.Placement.Base.y')
-    linked_obj.setExpression('.Placement.Base.z', f'{constraint_name}.Constraints.{od_param}')
-
-    array = Draft.make_polar_array(linked_obj, number=4, angle=360.0, center=App.Vector(0.0, 0.0, 0.0), use_link=True)
-    array.Fuse = False
-    Draft.autogroup(array)
-    array.Axis = (0, 1, 0)
-    array.Label = f"{inlay_type}_inlay_array"
-    array.Placement = App.Placement(App.Vector(0,0,0),App.Rotation(App.Vector(0,0,1),-90))
-    body = doc.getObject(part_name)
-    body.addObject(array)
-
-    doc.recompute()

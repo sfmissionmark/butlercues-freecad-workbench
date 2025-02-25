@@ -18,13 +18,14 @@ def pad_sketch(sketch, length_inches):
     doc.recompute()
 
 
-def rectangle(sketch = None, width_inches = 0.5, height_inches = 2):
+def rectangle(sketch = None, width_inches = 0.5, height_inches = 2, distance_y = 0.5):
     if sketch.TypeId != 'Sketcher::SketchObject':
         raise ValueError('Input must be a sketch object')
 
     # Convert inches to mm (FreeCAD uses mm internally)
     width = width_inches * 25.4
     height = height_inches * 25.4
+    y_distance = distance_y * 25.4
 
     # Add a rectangle to the sketch by drawing four lines
     p1 = App.Vector(0, 0)
@@ -47,10 +48,13 @@ def rectangle(sketch = None, width_inches = 0.5, height_inches = 2):
     sketch.addConstraint(Sketcher.Constraint('Vertical', 3))  # Left edge vertical
     sketch.addConstraint(Sketcher.Constraint('DistanceX', 0, 1, 0, 2, width))  # Width of rectangle
     sketch.addConstraint(Sketcher.Constraint('DistanceY', 0, 1, 3, 1, height))  # Height of rectangle
-    sketch.addConstraint(Sketcher.Constraint('DistanceY',-1,1,0,2,22.530000))
+    sketch.addConstraint(Sketcher.Constraint('DistanceY',-1,1,0,2,distance_y))
     sketch.addConstraint(Sketcher.Constraint('Symmetric',0,1,0,2,-2))
 
     print(f"Part created successfully ({width_inches}\" x {height_inches}\")")
+
+
+
 
 
 def diamond(sketch = None, width_inches = 0.5, height_inches = 2):
@@ -61,32 +65,38 @@ def diamond(sketch = None, width_inches = 0.5, height_inches = 2):
     width = width_inches * 25.4 / 2
     height = height_inches * 25.4 / 2
 
-    # Create diamond points from center
-    p1 = App.Vector(0, height/2)  # top
-    p2 = App.Vector(width/2, 0)   # right
-    p3 = App.Vector(0, -height/2) # bottom
-    p4 = App.Vector(-width/2, 0)  # left
+     # Define diamond points (1 inch tall, proportional width)
+    top = App.Base.Vector(0, 0.5, 0)   # Top point
+    right = App.Base.Vector(0.5, 0, 0) # Right point
+    bottom = App.Base.Vector(0, -0.5, 0) # Bottom point
+    left = App.Base.Vector(-0.5, 0, 0)  # Left point
 
-    # Add four lines to form diamond
-    sketch.addGeometry(Part.LineSegment(p1, p2), False)
-    sketch.addGeometry(Part.LineSegment(p2, p3), False)
-    sketch.addGeometry(Part.LineSegment(p3, p4), False)
-    sketch.addGeometry(Part.LineSegment(p4, p1), False)
+      # Add the lines to form the diamond
+    line1 = Part.LineSegment(top, right)
+    line2 = Part.LineSegment(right, bottom)
+    line3 = Part.LineSegment(bottom, left)
+    line4 = Part.LineSegment(left, top)
+    
+    line_ids = [
+        sketch.addGeometry(line1, False),
+        sketch.addGeometry(line2, False),
+        sketch.addGeometry(line3, False),
+        sketch.addGeometry(line4, False)
+    ]
 
-    # Add constraints to ensure diamond shape
-    sketch.addConstraint(Sketcher.Constraint('Coincident', 0, 2, 1, 1))
-    sketch.addConstraint(Sketcher.Constraint('Coincident', 1, 2, 2, 1))
-    sketch.addConstraint(Sketcher.Constraint('Coincident', 2, 2, 3, 1))
-    sketch.addConstraint(Sketcher.Constraint('Coincident', 3, 2, 0, 1))
-    sketch.addConstraint(Sketcher.Constraint('Equal', 0, 1))  # All sides equal
-    sketch.addConstraint(Sketcher.Constraint('Equal', 1, 2))
-    sketch.addConstraint(Sketcher.Constraint('Equal', 2, 3))
-    sketch.addConstraint(Sketcher.Constraint('DistanceX', 0, 1, 0, 2, width))  # Width constraint
-    sketch.addConstraint(Sketcher.Constraint('DistanceY', 0, 1, 2, 1, height)) # Height constraint
-    sketch.addConstraint(Sketcher.Constraint('Vertical',1,2,0,1))
-    sketch.addConstraint(Sketcher.Constraint('Vertical',0,1,-1,1))
-    sketch.addConstraint(Sketcher.Constraint('DistanceY',0,1,-1,1,-22.994079))
+    # Apply constraints to make sure it's symmetric and properly defined
+    # Add the distance constraints for height and width
+    sketch.addConstraint(Sketcher.Constraint('DistanceY', line1, 0, 0.5))  # top to center (vertical distance)
+    sketch.addConstraint(Sketcher.Constraint('DistanceY', line3, 1, -0.5)) # bottom to center (vertical distance)
+    
+    sketch.addConstraint(Sketcher.Constraint('DistanceX', line2, 0, 0.5))  # right to center (horizontal distance)
+    sketch.addConstraint(Sketcher.Constraint('DistanceX', line4, 1, -0.5)) # left to center (horizontal distance)
 
+    # Add symmetry constraints along both axes to ensure the diamond stays centered
+    sketch.addConstraint(Sketcher.Constraint('Symmetric', line1, 0, line3, 0))  # vertical symmetry (top-bottom)
+    sketch.addConstraint(Sketcher.Constraint('Symmetric', line2, 0, line4, 0))  # horizontal symmetry (left-right)
+
+    # Recompute and display
     print(f"Diamond created successfully ({width_inches}\" x {height_inches}\")")
 
 
