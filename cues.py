@@ -166,6 +166,7 @@ class FC_InlayCommand:
             "MenuText": f"Create {self.inlay_type} inlay",
             "ToolTip": f"Create a new {self.inlay_type} inlay"
         }
+    
 
     def Activated(self):
         inlays.create_inlay_document(self.inlay_type)
@@ -176,3 +177,45 @@ class FC_InlayCommand:
 # Register inlay commands
 for inlay_type in ["handle", "forearm", "butt_sleeve"]:
     FreeCADGui.addCommand(f"{inlay_type}_inlay", FC_InlayCommand(inlay_type))
+
+
+
+class FC_Inlayfix:
+    def __init__(self, inlay_type):
+        pass
+
+    def GetResources(self):
+            return {
+                "Pixmap": "",
+                "MenuText": f"Fillet for cnc",
+                "ToolTip": f"Fillet selected object for cnc"
+            }
+
+    def Activated(self):
+        inlays.fillet_for_cnc(self)
+
+    def IsActive(self):
+        return True
+
+FreeCADGui.addCommand("Fillet for cnc", FC_Inlayfix("fillet_for_cnc"))
+# FreeCADGui.addCommand("Job for inlay", FC_Inlayfix("job_for_inlay"))
+
+
+class FC_CNCCommand:
+    def __init__(self, inlay_type):
+        pass
+
+    def GetResources(self):
+            return {
+                "Pixmap": "",
+                "MenuText": f"Job for inlay",
+                "ToolTip": f"Create a new Job for inlay"
+            }
+
+    def Activated(self):
+        inlays.create_cam_job()
+
+    def IsActive(self):
+        return True
+    
+FreeCADGui.addCommand("Job for inlay", FC_CNCCommand("job_for_inlay"))

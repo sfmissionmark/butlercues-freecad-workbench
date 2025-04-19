@@ -33,9 +33,6 @@ def parts_to_color():
             bodies = [obj for obj in anObject.Group if obj.TypeId == "PartDesign::Body"]
             for body in bodies:
                 parts_to_color.append(body)
-        elif "Revolution" in anObject.Name:
-            name = anObject.Name.split("Revolution_")[-1]
-            parts_to_color.append(App.ActiveDocument.getObject(name))    
         else:
             #meh try anyway
             parts_to_color.append(anObject)
@@ -112,8 +109,8 @@ def restore_wood():
             if obj.getTypeIdOfProperty(property_name) == property_type:
                 matching_objects.append(obj)
 
-    print(f"Found {len(matching_objects)} objects with {property_name} property.")
-    print(f"Restoring wood textures.")
+    if matching_objects:
+        print(f"Restoring wood textures to {len(matching_objects)} objects.")
 
     for a_file in matching_objects:
         wood_name = os.path.basename(a_file.Texture_URL).split(".")[0]
@@ -124,7 +121,6 @@ def set_wood(image_name="Amboyna", optional_parts=None):
     if optional_parts is None:
         optional_parts = parts_to_color()
     for iObj in optional_parts:
-        print(f"Setting wood {image_name} texture for {iObj.Name}")
         remove_texture(iObj)
         rootnode = iObj.ViewObject.RootNode
         

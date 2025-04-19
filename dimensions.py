@@ -36,7 +36,7 @@ def cue_dimensions():
             "endod": "1.000 in",
             "id": "0.625 in",
             "length": "11.50 in",
-            "wood_type": "Cocobolo",
+            "wood_type": "Gaboon_Ebony",
         },
         "forearm_core": {
             "od": "0.620 in",

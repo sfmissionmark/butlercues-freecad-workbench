@@ -128,5 +128,3 @@ def triangle(sketch = None, width_inches = 0.5, height_inches = 4):
     sketch.addConstraint(Sketcher.Constraint('Vertical',1,2,-1,1))
     sketch.addConstraint(Sketcher.Constraint('Symmetric',0,2,0,1,-2))
     sketch.addConstraint(Sketcher.Constraint('DistanceY',0,1,0))
-
-    print(f"Triangle created successfully ({width_inches}\" x {height_inches}\")")

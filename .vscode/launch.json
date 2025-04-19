@@ -12,29 +12,29 @@
         "clean": false,
         "configureAll": false
     },
-        {
-            "name": "Python: Attach using Process Id",
-            "type": "python",
-            "request": "attach",
-            "processId": "${command:pickProcess}",
-            "justMyCode": true
+    {
+        "name": "Python: Attach using Process Id",
+        "type": "debugpy",
+        "request": "attach",
+        "processId": "${command:pickProcess}",
+        "justMyCode": true
+    },
+    {
+        "name": "Attach to FreeCAD",
+        "type": "debugpy",
+        "request": "attach",
+        "connect": {
+            "host": "localhost",
+            "port": 5678
         },
-        {
-            "name": "Attach to FreeCAD",
-            "type": "debugpy",
-            "request": "attach",
-            "connect": {
-                "host": "localhost",
-                "port": 5678
-            },
-            "redirectOutput": true,
-            "showReturnValue": true,
-            "pathMappings": [
-                {
-                    "localRoot": ".",
-                    "remoteRoot": "."
-                }
-            ]
-        }
+        "redirectOutput": true,
+        "showReturnValue": true,
+        "pathMappings": [
+            {
+                "localRoot": ".",
+                "remoteRoot": "."
+            }
+        ]
+    }
     ]
 }

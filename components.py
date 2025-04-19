@@ -51,7 +51,6 @@ class CueComponentManager:
                 var_set = self.doc.addObject("App::VarSet", var_set_name)
                 for section, values in dimensions_dict.items():
                     for key, value in values.items():
-                        print(f"Adding {key} to {var_set_name}")
                         if key not in ["wood_type", "material"]:
                             property_name = section + "_" + key
                             var_set.addProperty("App::PropertyLength", property_name, group=section, doc=f"{property_name} Length")

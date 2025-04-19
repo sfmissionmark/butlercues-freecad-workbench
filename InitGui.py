@@ -48,6 +48,10 @@ class MyWorkbench (Workbench):
         self.appendMenu("Inlays", []) # creates a new menu
         for i in ["forearm", "handle", "butt_sleeve"]:
             self.appendMenu("Inlays", f"{i}_inlay")
+        self.appendMenu("Inlays", "Fillet for cnc")
+
+        self.appendMenu("CNC", []) # creates a new menu
+        self.appendMenu("CNC", "Job for inlay")
 
         return
 
