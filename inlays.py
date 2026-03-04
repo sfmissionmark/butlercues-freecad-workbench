@@ -130,15 +130,18 @@ def create_sketch(inlay_type = "handle", inlay_name = None):
     object_names = [obj.Name for obj in component_group.Group]
 
     # Find the indices of "handle" and "handle_group"
-    index_handle = object_names.index(inlay_type)
-    index_handle_group = object_names.index(group_name)
-    # Reorder: Remove "inlay_group" and reinsert it after "inlay"
-    if index_handle_group != index_handle + 1:
-        handle_group_obj = component_group.Group[index_handle_group]
-        component_group.removeObject(handle_group_obj)  # Remove "handle_group"
-        component_group.addObject(handle_group_obj)     # Add it back at the end
-        reordered_list = component_group.Group[:index_handle + 1] + [handle_group_obj] + component_group.Group[index_handle + 1:-1]
-        component_group.Group = reordered_list
+    try:
+        index_handle = object_names.index(inlay_type)
+        index_handle_group = object_names.index(group_name)
+        # Reorder: Remove "inlay_group" and reinsert it after "inlay"
+        if index_handle_group != index_handle + 1:
+            handle_group_obj = component_group.Group[index_handle_group]
+            component_group.removeObject(handle_group_obj)  # Remove "handle_group"
+            component_group.addObject(handle_group_obj)     # Add it back at the end
+            reordered_list = component_group.Group[:index_handle + 1] + [handle_group_obj] + component_group.Group[index_handle + 1:-1]
+            component_group.Group = reordered_list
+    except ValueError:
+        print(f"Skipping inlay group reorder for '{inlay_type}': expected objects were not found.")
     #target_doc.getObject(group_name).addObject(target_doc.getObject(inlay_type))
 
     # create link to inlay object and move to group

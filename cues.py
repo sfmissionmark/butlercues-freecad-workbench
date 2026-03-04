@@ -1,6 +1,5 @@
 import FreeCAD
 import FreeCADGui
-from dimensions import *
 import materials
 import components
 import inlays
