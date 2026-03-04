@@ -173,8 +173,11 @@ def create_sketch(inlay_type = "handle", inlay_name = None):
     # Position object to part
     lnk = target_doc.getObject(link_name)
     lnk.Placement = App.Placement(App.Vector(0, 0, 0), App.Rotation(App.Vector(0,0,1), 180))
-    lnk.setExpression('.Placement.Base.y', f'.Placement.Base.x + {inlay_type}.Placement.Base.y + {inlay_type}.Height')
-    lnk.setExpression('.Placement.Base.z', f'{inlay_type}.Radius2')
+    lnk.setExpression('.Placement.Base.y', f'.Placement.Base.x + {inlay_type}.Placement.Base.y + CueDimensions.{inlay_type}_length')
+    lnk.setExpression(
+        '.Placement.Base.z',
+        f'(CueDimensions.finish_size_startod + ((CueDimensions.finish_size_endod - CueDimensions.finish_size_startod) / CueDimensions.finish_size_length) * ({inlay_type}.Placement.Base.y + CueDimensions.{inlay_type}_length))/2'
+    )
 
     # Create array of inlays
     array = Draft.make_polar_array(lnk, number=4, angle=360.0, center=App.Vector(0.0, 0.0, 0.0), use_link=True)
