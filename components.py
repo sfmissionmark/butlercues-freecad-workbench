@@ -105,6 +105,7 @@ class CueComponent:
             temp_name = f"{self.name}_{i}"
             i += 1
         self.name = temp_name
+        part_dimensions = dimensions.cue_dimensions().get(self.part_name, {})
         expression = f'CueDimensions.{self.part_name}_'
         start_expression ="(CueDimensions.finish_size_startod + ((CueDimensions.finish_size_endod - CueDimensions.finish_size_startod) / CueDimensions.finish_size_length) * Placement.Base.y)/2"
         end_expression ="(CueDimensions.finish_size_startod + ((CueDimensions.finish_size_endod - CueDimensions.finish_size_startod) / CueDimensions.finish_size_length) * (Placement.Base.y + Height))/2"
@@ -119,20 +120,25 @@ class CueComponent:
                 fc_object.MapMode = 'Concentric'
                 fc_object.recompute()
 
-        if self.part_name == "joint_ring" and "id" in dimensions.cue_dimensions()[self.part_name]:
+        if "id" in part_dimensions:
             outer_part = self.fc_doc.addObject("Part::Cone", f"{self.name}_outer")
-            inner_part = self.fc_doc.addObject("Part::Cone", f"{self.name}_inner")
+            inner_part = self.fc_doc.addObject("Part::Cylinder", f"{self.name}_inner")
 
             outer_part.setExpression('Radius1', start_expression)
             outer_part.setExpression('Radius2', end_expression)
             outer_part.setExpression('Height', f'{expression}length')
 
-            inner_part.setExpression('Radius1', f'{expression}id / 2')
-            inner_part.setExpression('Radius2', f'{expression}id / 2')
-            inner_part.setExpression('Height', f'{expression}length')
+            inner_part.setExpression('Radius', f'{expression}id / 2')
+            if self.part_name == "joint_cap" and "bore_depth" in part_dimensions:
+                inner_part.setExpression('Height', f'{expression}bore_depth')
+            else:
+                inner_part.setExpression('Height', f'{expression}length')
 
             attach_to_previous(outer_part)
             attach_to_previous(inner_part)
+
+            if self.part_name == "joint_cap" and "bore_depth" in part_dimensions:
+                inner_part.setExpression('Placement.Base.y', f'{expression}length - {expression}bore_depth')
 
             part = self.fc_doc.addObject("Part::Cut", self.name)
             part.Base = outer_part
@@ -157,13 +163,13 @@ class CueComponent:
             part.setExpression('Radius2', end_expression)
 
         self.reset_view()
-        if 'wood_type' in dimensions.cue_dimensions()[self.part_name]:
+        if 'wood_type' in part_dimensions:
             fc_part = [self.fc_doc.getObject(self.name)]
-            wood = dimensions.cue_dimensions()[self.part_name]['wood_type']
+            wood = part_dimensions['wood_type']
             materials.set_wood(image_name=wood, optional_parts=fc_part)
-        if 'material' in dimensions.cue_dimensions()[self.part_name]:
+        if 'material' in part_dimensions:
             fc_part = [self.fc_doc.getObject(self.name)]
-            material = dimensions.cue_dimensions()[self.part_name]['material']
+            material = part_dimensions['material']
             if material == "black":
                 materials.setMaterial(color = (0.0, 0.0, 0.0), optional_parts=fc_part)
             else:
