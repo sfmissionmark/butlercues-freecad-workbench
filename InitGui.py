@@ -2,9 +2,37 @@
 # -*- coding: utf-8 -*-
 
 import os
+import inspect
 import FreeCAD
 import FreeCADGui
 from FreeCADGui import Workbench
+
+
+def _resolve_icon_path():
+    module_file = globals().get("__file__")
+    if not module_file:
+        try:
+            module_file = inspect.getsourcefile(_resolve_icon_path)
+        except Exception:
+            module_file = None
+
+    candidates = []
+    if module_file:
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(module_file)), "resources", "icons", "bcwb.png"))
+
+    try:
+        user_mod_dir = os.path.join(FreeCAD.getUserAppDataDir(), "Mod")
+        candidates.extend([
+            os.path.join(user_mod_dir, "butlercues-freecad-workbench", "resources", "icons", "bcwb.png"),
+            os.path.join(user_mod_dir, "ButlerCues", "resources", "icons", "bcwb.png"),
+        ])
+    except Exception:
+        pass
+
+    for icon_path in candidates:
+        if icon_path and os.path.exists(icon_path):
+            return icon_path
+    return ""
 
 
 
@@ -12,7 +40,7 @@ class MyWorkbench (Workbench):
 
     MenuText = "Cues"
     ToolTip = "A description of my workbench"
-    _icon_path = os.path.join(os.path.dirname(__file__), "resources", "icons", "bcwb.png")
+    _icon_path = _resolve_icon_path()
     Icon = _icon_path
 
     def Initialize(self):
