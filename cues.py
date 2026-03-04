@@ -1,9 +1,38 @@
 import FreeCAD
 import FreeCADGui
+import os
 from dimensions import *
 import materials
 import components
 import inlays
+
+
+def _resolve_default_icon():
+    icon_name = "bcwb.png"
+    module_file = globals().get("__file__")
+    candidates = []
+
+    if module_file:
+        module_dir = os.path.dirname(os.path.abspath(module_file))
+        candidates.append(os.path.join(module_dir, "resources", "icons", icon_name))
+
+    try:
+        user_mod_dir = os.path.join(FreeCAD.getUserAppDataDir(), "Mod")
+        candidates.extend([
+            os.path.join(user_mod_dir, "butlercues-freecad-workbench", "resources", "icons", icon_name),
+            os.path.join(user_mod_dir, "ButlerCues", "resources", "icons", icon_name),
+        ])
+    except Exception:
+        pass
+
+    for icon_path in candidates:
+        if icon_path and os.path.exists(icon_path):
+            return icon_path
+
+    return ""
+
+
+_DEFAULT_ICON = _resolve_default_icon()
 
 class FC_CueCommand:
     def __init__(self, part_name, menu_text, tooltip, shortcut=None):
@@ -14,7 +43,7 @@ class FC_CueCommand:
 
     def GetResources(self):
         resources = {
-            "Pixmap": "",
+            "Pixmap": _DEFAULT_ICON,
             "MenuText": self.menu_text,
             "ToolTip": self.tooltip
         }
@@ -53,7 +82,7 @@ class MaterialCommand:
         self.menu_text = menu_text
     def GetResources(self):
         return {
-            "Pixmap": "",
+            "Pixmap": _DEFAULT_ICON,
             "MenuText": self.menu_text,
             "ToolTip": f"Set material to {self.menu_text}",
             # "Accel": f"Ctrl+Alt+{self.menu_text[0]}",
@@ -78,7 +107,7 @@ class WoodCommand:
         self.menu_text = menu_text
     def GetResources(self):
         return {
-            "Pixmap": "",
+            "Pixmap": _DEFAULT_ICON,
             "MenuText": self.menu_text,
             "ToolTip": f"Set material to {self.color}"
         }
@@ -97,7 +126,7 @@ for wood in wood_list:
 class RestoreWoodCommand:
     def GetResources(self):
         return {
-            "Pixmap": "",
+            "Pixmap": _DEFAULT_ICON,
             "MenuText": "Restore Wood",
             "ToolTip": f"Restore wood from stored texture urls",
             "Accel": "Ctrl+Alt+R"
@@ -114,7 +143,7 @@ FreeCADGui.addCommand("Restore Wood", RestoreWoodCommand())
 class UpdatePreviewInlaysCommand:
     def GetResources(self):
         return {
-            "Pixmap": "",
+            "Pixmap": _DEFAULT_ICON,
             "MenuText": "Update Preview Inlays",
             "ToolTip": f"Update all preview inlays"
         }
@@ -131,7 +160,7 @@ FreeCADGui.addCommand("Update Inlays", UpdatePreviewInlaysCommand())
 class FC_FullCue:
     def GetResources(self):
         return {
-            "Pixmap": "",
+            "Pixmap": _DEFAULT_ICON,
             "MenuText": "Full Cue",
             "ToolTip": "Create a new Full Cue"
         }
@@ -162,7 +191,7 @@ class FC_InlayCommand:
 
     def GetResources(self):
         return {
-            "Pixmap": "",
+            "Pixmap": _DEFAULT_ICON,
             "MenuText": f"Create {self.inlay_type} inlay",
             "ToolTip": f"Create a new {self.inlay_type} inlay"
         }
@@ -186,7 +215,7 @@ class FC_Inlayfix:
 
     def GetResources(self):
             return {
-                "Pixmap": "",
+                "Pixmap": _DEFAULT_ICON,
                 "MenuText": f"Fillet for cnc",
                 "ToolTip": f"Fillet selected object for cnc"
             }
@@ -207,7 +236,7 @@ class FC_CNCCommand:
 
     def GetResources(self):
             return {
-                "Pixmap": "",
+                "Pixmap": _DEFAULT_ICON,
                 "MenuText": f"Job for inlay",
                 "ToolTip": f"Create a new Job for inlay"
             }
