@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<package format="1">
+  <name>ButlerCues</name>
+  <description>FreeCAD workbench for designing custom pool cue components, materials, and inlays.</description>
+  <version>0.1.0</version>
+  <date>2026-03-04</date>
+  <maintainer email="">Mark Butler</maintainer>
+  <license>Proprietary</license>
+  <url type="repository">https://github.com/sfmissionmark/butlercues-freecad-workbench</url>
+  <url type="homepage">https://github.com/sfmissionmark/butlercues-freecad-workbench</url>
+  <content>
+    <workbench>InitGui.py</workbench>
+  </content>
+  <dependencies>
+    <freecad min="0.21"/>
+  </dependencies>
+  <tags>
+    <tag>freecad</tag>
+    <tag>workbench</tag>
+    <tag>cad</tag>
+    <tag>pool-cue</tag>
+  </tags>
+</package>

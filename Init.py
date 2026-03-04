@@ -3,6 +3,7 @@
 
 import FreeCAD as App
 import FreeCADGui as Gui
+import os
 
 class DocumentObserver:
     def slotActiveDocument(self, doc):
@@ -13,8 +14,6 @@ class DocumentObserver:
             doc (str): The name of the newly activated document.
         """
         if doc:
-            print(f"Active document changed to: {doc}")
-            # Run your script here
             your_script(doc)
 
 def your_script(active_document_name):
@@ -24,14 +23,20 @@ def your_script(active_document_name):
     Parameters:
         active_document_name (str): The name of the active document.
     """
-    print(f"Running script for active document: {active_document_name}")
-    # Add your desired functionality here
     doc = App.getDocument(active_document_name)
-    if doc:
-        print(f"Document '{doc.Name}' contains {len(doc.Objects)} objects.")
+    if not doc:
+        return
 
-# Attach the observer
-observer = DocumentObserver()
-App.addDocumentObserver(observer)
 
-print("Document observer has been added.")
+observer = None
+
+
+def install_document_observer():
+    global observer
+    if observer is None:
+        observer = DocumentObserver()
+        App.addDocumentObserver(observer)
+
+# Keep observer installation opt-in. Set BUTLERCUES_ENABLE_OBSERVER=1 to enable.
+if os.environ.get("BUTLERCUES_ENABLE_OBSERVER", "").lower() in {"1", "true", "yes", "on"}:
+    install_document_observer()

@@ -20,7 +20,6 @@ Note:
 # Import required modules
 import FreeCAD as App
 import FreeCADGui as Gui
-from BOPTools import BOPFeatures
 
 import dimensions
 import materials

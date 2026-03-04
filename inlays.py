@@ -9,8 +9,7 @@ FreeCAD workbench module for ButlerCues
 import FreeCAD as App
 import FreeCADGui as Gui
 import Draft
-from BOPTools import BOPFeatures
-import Path
+import os
 
 
 import materials
@@ -264,14 +263,36 @@ def create_cam_job():
         return
 
     inlay_face = selected_objects[0].Name
-    template_path = '/Users/markbutler/Library/Application Support/FreeCAD/Macro/job_6090-pocket.json'
-    import Path.Main.Gui.Job # type: ignore
+    user_home = os.path.expanduser("~")
+    template_path = os.path.join(
+        user_home,
+        "Library",
+        "Application Support",
+        "FreeCAD",
+        "Macro",
+        "job_6090-pocket.json",
+    )
+
+    try:
+        import Path
+        import Path.Main.Job as PathJob
+    except Exception as exc:
+        print(f"Path workbench is not available: {exc}")
+        return
+    obj = doc.getObject("CueComponents")
+
+    sub = obj.getSubObject("Face13")
+    selected_objects = Gui.Selection.getSelection()
+    PathJob.Create("test", selected_objects, template_path)
+
+
+
     job = Path.Main.Gui.Job.Create([inlay_face], template = template_path, openTaskPanel = False)
 
     pocket = Path.Op.PocketShape.Create("PocketShape")
     pocket.ToolController = job.ToolController[0]
 
-    
+
     # pocket.ToolController = job.ToolController
 
 

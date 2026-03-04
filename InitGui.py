@@ -12,7 +12,8 @@ class MyWorkbench (Workbench):
 
     MenuText = "Cues"
     ToolTip = "A description of my workbench"
-    Icon = os.path.expanduser("~/Library/Application Support/FreeCAD/Mod/ButlerCues/resources/icons/bcwb.png")
+    _icon_path = os.path.join(os.path.dirname(__file__), "resources", "icons", "bcwb.png")
+    Icon = _icon_path
 
     def Initialize(self):
         """This function is executed when the workbench is first activated.

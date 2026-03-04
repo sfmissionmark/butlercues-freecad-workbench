@@ -16,8 +16,12 @@ import Part
 import Sketcher
 import FreeCADGui as Gui
 import dimensions
-from pivy import coin
 import os
+
+try:
+    from pivy import coin
+except Exception:
+    coin = None
 
 
 def parts_to_color():
@@ -97,6 +101,9 @@ def get_wood_images():
 
 
 def restore_wood():
+    if coin is None:
+        print("Skipping wood texture restore: pivy/coin is unavailable.")
+        return
     doc = App.ActiveDocument
     if not doc: return
     matching_objects = []
@@ -118,6 +125,9 @@ def restore_wood():
 
 
 def set_wood(image_name="Amboyna", optional_parts=None):
+    if coin is None:
+        print("Cannot apply wood texture: pivy/coin is unavailable.")
+        return
     if optional_parts is None:
         optional_parts = parts_to_color()
     for iObj in optional_parts:
@@ -173,6 +183,8 @@ def set_wood(image_name="Amboyna", optional_parts=None):
 
 
 def remove_texture(obj):
+    if coin is None:
+        return
     rootnode = obj.ViewObject.RootNode
     # Remove texture-related nodes
     children_to_remove = []
