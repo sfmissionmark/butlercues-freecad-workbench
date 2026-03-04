@@ -105,28 +105,56 @@ class CueComponent:
             temp_name = f"{self.name}_{i}"
             i += 1
         self.name = temp_name
-        part = self.fc_doc.addObject("Part::Cone", self.name)
-        part.Label = ' '.join(self.name.split('_')).title()
-        self.container_group.addObject(part)
-
         expression = f'CueDimensions.{self.part_name}_'
-        part.setExpression('Radius1', f'{expression}od / 2')
-        part.setExpression('Radius2', f'{expression}endod /2')
-        part.setExpression('Height', f'{expression}length')
-
-        part.Placement = App.Placement(App.Vector(0,0,0),App.Rotation(App.Vector(1,0,0),-90))
-        previous_component = self.manager.get_previous_freecad_object(self)
-        if previous_component:
-            part.MapReversed = False
-            part.AttachmentSupport = [(previous_component, 'Edge1')]
-            part.MapPathParameter = 0
-            part.MapMode = 'Concentric'
-            part.recompute()
-
         start_expression ="(CueDimensions.finish_size_startod + ((CueDimensions.finish_size_endod - CueDimensions.finish_size_startod) / CueDimensions.finish_size_length) * Placement.Base.y)/2"
         end_expression ="(CueDimensions.finish_size_startod + ((CueDimensions.finish_size_endod - CueDimensions.finish_size_startod) / CueDimensions.finish_size_length) * (Placement.Base.y + Height))/2"
-        part.setExpression('Radius1', start_expression)
-        part.setExpression('Radius2', end_expression)
+
+        def attach_to_previous(fc_object):
+            fc_object.Placement = App.Placement(App.Vector(0,0,0),App.Rotation(App.Vector(1,0,0),-90))
+            previous_component = self.manager.get_previous_freecad_object(self)
+            if previous_component:
+                fc_object.MapReversed = False
+                fc_object.AttachmentSupport = [(previous_component, 'Edge1')]
+                fc_object.MapPathParameter = 0
+                fc_object.MapMode = 'Concentric'
+                fc_object.recompute()
+
+        if self.part_name == "joint_ring" and "id" in dimensions.cue_dimensions()[self.part_name]:
+            outer_part = self.fc_doc.addObject("Part::Cone", f"{self.name}_outer")
+            inner_part = self.fc_doc.addObject("Part::Cone", f"{self.name}_inner")
+
+            outer_part.setExpression('Radius1', start_expression)
+            outer_part.setExpression('Radius2', end_expression)
+            outer_part.setExpression('Height', f'{expression}length')
+
+            inner_part.setExpression('Radius1', f'{expression}id / 2')
+            inner_part.setExpression('Radius2', f'{expression}id / 2')
+            inner_part.setExpression('Height', f'{expression}length')
+
+            attach_to_previous(outer_part)
+            attach_to_previous(inner_part)
+
+            part = self.fc_doc.addObject("Part::Cut", self.name)
+            part.Base = outer_part
+            part.Tool = inner_part
+            part.Label = ' '.join(self.name.split('_')).title()
+            self.container_group.addObject(part)
+
+            outer_part.Visibility = False
+            inner_part.Visibility = False
+        else:
+            part = self.fc_doc.addObject("Part::Cone", self.name)
+            part.Label = ' '.join(self.name.split('_')).title()
+            self.container_group.addObject(part)
+
+            part.setExpression('Radius1', f'{expression}od / 2')
+            part.setExpression('Radius2', f'{expression}endod /2')
+            part.setExpression('Height', f'{expression}length')
+
+            attach_to_previous(part)
+
+            part.setExpression('Radius1', start_expression)
+            part.setExpression('Radius2', end_expression)
 
         self.reset_view()
         if 'wood_type' in dimensions.cue_dimensions()[self.part_name]:
