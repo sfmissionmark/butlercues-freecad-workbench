@@ -32,6 +32,9 @@ def find_object_by_label(doc, label):
 def create_inlay_document(inlay_type):
     """Create a new document for the specified inlay type"""
     doc = App.ActiveDocument
+    if not doc:
+        print("No active cue document. Please open/create a cue document first.")
+        return
         
     doc_name = f"{inlay_type}_inlay"
     part_object = doc.getObject("handle_part")
@@ -119,12 +122,25 @@ def create_sketch(inlay_type = "handle", inlay_name = None):
 
     source_doc = App.getDocument(source_name)
     target_doc = App.activeDocument()
+    if not source_doc:
+        print(f"Inlay source document '{source_name}' was not found.")
+        return
+    if not target_doc:
+        print("No active target document.")
+        return
 
     # Make group for inlay component
     component_group = target_doc.getObject('CueComponents')
+    if not component_group:
+        print("CueComponents group was not found in the active document.")
+        return
     group = target_doc.addObject('App::DocumentObjectGroup',group_name)
     group.Label = group_name.replace('_', ' ').title()
-    component_group.addObject(target_doc.getObject(group_name))
+    group_obj = target_doc.getObject(group_name)
+    if not group_obj:
+        print(f"Failed to create inlay group '{group_name}'.")
+        return
+    component_group.addObject(group_obj)
 
     # Move group into component group
     object_names = [obj.Name for obj in component_group.Group]
@@ -148,8 +164,11 @@ def create_sketch(inlay_type = "handle", inlay_name = None):
     source_object = find_object_by_label(source_doc, 'final_inlay')
     if not source_object:
         source_object = source_doc.getObject(f'{inlay_type}_pad')
+    if not source_object:
+        print(f"No inlay source object found in '{source_name}'.")
+        return
     target_doc.addObject('App::Link', link_name).LinkedObject = source_object
-    target_doc.getObject(group_name).addObject(target_doc.getObject(link_name))
+    group_obj.addObject(target_doc.getObject(link_name))
 
     # Position object to part
     lnk = target_doc.getObject(link_name)
@@ -163,11 +182,14 @@ def create_sketch(inlay_type = "handle", inlay_name = None):
     Draft.autogroup(array)
     array.Axis = (0, 1, 0)
     array.Label = f"{inlay_type}_inlay_array"
-    target_doc.getObject(group_name).addObject(array) # cant seem to add name
+    group_obj.addObject(array) # cant seem to add name
     target_doc.recompute()
 
     # create cut component
     obj = target_doc.getObject(inlay_type)
+    if not obj:
+        print(f"Target cue component '{inlay_type}' was not found in the active document.")
+        return
     texture = None
     if "Texture_URL" in obj.PropertiesList:
         texture = obj.Texture_URL
@@ -178,13 +200,13 @@ def create_sketch(inlay_type = "handle", inlay_name = None):
         cut_obj.addProperty("App::PropertyString", "Texture_URL", "Texture", "Texture URL or HDD local path.")
         cut_obj.Texture_URL = texture
         materials.restore_wood()
-    target_doc.getObject(group_name).addObject(cut_obj)
+    group_obj.addObject(cut_obj)
 
     # create preview inlay
     cut_obj = target_doc.addObject("Part::Common", f"{inlay_type} inlay previews")
     cut_obj.Tool = array
     cut_obj.Base = target_doc.getObject(inlay_type)
-    target_doc.getObject(group_name).addObject(cut_obj)
+    group_obj.addObject(cut_obj)
 
     target_doc.recompute()
 

@@ -69,7 +69,13 @@ class MyWorkbench (Workbench):
     def ContextMenu(self, recipient):
         """This function is executed whenever the user right-clicks on screen"""
         # "recipient" will be either "view" or "tree"
-        self.appendContextMenu("Materials", self.list) # add commands to the context menu
+        import materials
+
+        material_commands = [material['name'] for material in materials.materials()]
+        wood_commands = [wood['name'] for wood in materials.get_wood_images()]
+        material_commands.extend(wood_commands)
+        material_commands.append("Restore Wood")
+        self.appendContextMenu("Materials", material_commands)
 
     def GetClassName(self): 
         # This function is mandatory if this is a full Python workbench

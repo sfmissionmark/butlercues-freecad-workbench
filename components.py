@@ -37,7 +37,6 @@ def inchToMM(num):
 
 
 class CueComponentManager:
-    doc = App.activeDocument()
     _objects = []
     def __init__(self):
         self.doc = App.activeDocument() or App.newDocument("Cue")
