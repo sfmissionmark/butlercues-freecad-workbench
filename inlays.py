@@ -75,7 +75,8 @@ def draw_stock(cue_document_name = "Unnamed",
     var_set = cue_document.getObject("CueDimensions")
     inlay_document = App.getDocument(inlay_document_name)
 
-    part_name = inlay_document_name.strip("_inlay")
+    suffix = "_inlay"
+    part_name = inlay_document_name[:-len(suffix)] if inlay_document_name.endswith(suffix) else inlay_document_name
     height = getattr(var_set, f'{part_name}_length').Value / 25.4  # Convert mm to inches
     width = getattr(var_set, f'{part_name}_od').Value / 25.4  # Convert mm to inches
 
@@ -191,7 +192,12 @@ def fillet_for_cnc(noise = None):
     fillet_radius_inch = 0.014
     doc = App.ActiveDocument
 
-    selected_object = Gui.Selection.getSelection()[0]
+    selection = Gui.Selection.getSelection()
+    if not selection:
+        print("No object selected. Please select an object.")
+        return
+
+    selected_object = selection[0]
 
     obj = selected_object
     print(20*"*")
@@ -245,7 +251,7 @@ def fillet_for_cnc(noise = None):
 
 def prepare_for_inlay():
     doc = App.ActiveDocument
-    selection = Gui.Selection.getSelection()[0]
+    selection = Gui.Selection.getSelection()
     if not selection:
         print("No object selected. Please select an object.")
         return

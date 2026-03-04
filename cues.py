@@ -111,22 +111,6 @@ class RestoreWoodCommand:
 FreeCADGui.addCommand("Restore Wood", RestoreWoodCommand())
 
 
-class UpdatePreviewInlaysCommand:
-    def GetResources(self):
-        return {
-            "Pixmap": "",
-            "MenuText": "Update Preview Inlays",
-            "ToolTip": f"Update all preview inlays"
-        }
-    
-    def Activated(self):
-        inlays.update_all_previews()
-    def IsActive(self):
-        return True
-
-FreeCADGui.addCommand("Update Inlays", UpdatePreviewInlaysCommand())
-
-
 # Full Cue command
 class FC_FullCue:
     def GetResources(self):
