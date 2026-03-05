@@ -16,6 +16,42 @@ import materials
 import sketchershapes
 
 
+def _get_inlay_depth_inches(cue_doc, inlay_type, requested_depth_inches=0.2, clearance_inches=0.01):
+    var_set = cue_doc.getObject("CueDimensions") if cue_doc else None
+    if not var_set:
+        return requested_depth_inches
+
+    try:
+        od_mm = getattr(var_set, f"{inlay_type}_od").Value
+        id_mm = getattr(var_set, f"{inlay_type}_id").Value
+    except Exception:
+        return requested_depth_inches
+
+    wall_thickness_inches = max(0.0, (od_mm - id_mm) / 2.0 / 25.4)
+    max_depth_inches = max(0.01, wall_thickness_inches - clearance_inches)
+    clamped_depth = min(requested_depth_inches, max_depth_inches)
+
+    if clamped_depth < requested_depth_inches:
+        print(
+            f"Clamped {inlay_type} inlay depth from {requested_depth_inches:.3f}in to {clamped_depth:.3f}in "
+            f"to stay within wall thickness."
+        )
+
+    return clamped_depth
+
+
+def _get_inlay_source_object(inlay_type):
+    source_name = f"{inlay_type}_inlay"
+    source_doc = App.getDocument(source_name)
+    if not source_doc:
+        return None, None
+
+    source_object = find_object_by_label(source_doc, 'final_inlay')
+    if not source_object:
+        source_object = source_doc.getObject(f'{inlay_type}_pad')
+    return source_doc, source_object
+
+
 def find_object_by_label(doc, label):
     """Find an object in the document by its label.
 
@@ -40,7 +76,8 @@ def create_inlay_document(inlay_type):
     part_object = doc.getObject("handle_part")
 
     if not doc_name in App.listDocuments().keys():
-        new_document(doc_name, inlay_type)
+        depth_inches = _get_inlay_depth_inches(doc, inlay_type)
+        new_document(doc_name, inlay_type, depth_inches)
 
     Gui.setActiveDocument(doc)
 
@@ -48,7 +85,7 @@ def create_inlay_document(inlay_type):
 
 
 
-def new_document(doc_name, inlay_type):
+def new_document(doc_name, inlay_type, inlay_depth_inches=0.2):
     doc = App.newDocument(doc_name)
     doc.Label = doc_name
     Gui.SendMsgToActiveView("Save")
@@ -66,7 +103,7 @@ def new_document(doc_name, inlay_type):
     else:
         raise ValueError(f"Invalid inlay type: {inlay_type}")
     
-    sketchershapes.pad_sketch(sketch, 0.2)
+    sketchershapes.pad_sketch(sketch, inlay_depth_inches)
 
 
 def draw_stock(cue_document_name = "Unnamed", 
@@ -173,7 +210,7 @@ def create_sketch(inlay_type = "handle", inlay_name = None):
     # Position object to part
     lnk = target_doc.getObject(link_name)
     lnk.Placement = App.Placement(App.Vector(0, 0, 0), App.Rotation(App.Vector(0,0,1), 180))
-    lnk.setExpression('.Placement.Base.y', f'.Placement.Base.x + {inlay_type}.Placement.Base.y + CueDimensions.{inlay_type}_length')
+    lnk.setExpression('.Placement.Base.y', f'{inlay_type}.Placement.Base.y + CueDimensions.{inlay_type}_length')
     lnk.setExpression(
         '.Placement.Base.z',
         f'(CueDimensions.finish_size_startod + ((CueDimensions.finish_size_endod - CueDimensions.finish_size_startod) / CueDimensions.finish_size_length) * ({inlay_type}.Placement.Base.y + CueDimensions.{inlay_type}_length))/2'
@@ -228,9 +265,6 @@ def fillet_for_cnc(noise = None):
     selected_object = selection[0]
 
     obj = selected_object
-    print(20*"*")
-    print(f"obj {obj}")
-    print(20*"*")
     obj_label = obj.Label
 
 
@@ -246,7 +280,6 @@ def fillet_for_cnc(noise = None):
     # Identify edges parallel to the Z-axis
     edge_indices = []
     for i, edge in enumerate(shape.Edges):
-        print(f"i {i}: edge {edge}: ty {edge.Curve.TypeId}")
         if edge.Curve.TypeId == "Part::GeomLine":
             if edge.Curve.Direction.isParallel(App.Vector(0, 0, 1), 1e-6):
                 edge_indices.append(i + 1)  # Collect edge index
@@ -268,10 +301,11 @@ def fillet_for_cnc(noise = None):
     # Hide the original object
     obj.Visibility = False
 
-    # Create a new object to display the filleted solid
-    filleted_obj = doc.addObject("Part::Feature", f"{obj.Label}_bit_fillet")
-    filleted_obj.Shape = fillet
-    filleted_obj.Label = f"{obj.Label}_bit_fillet"
+    final_obj = doc.getObject("final_inlay")
+    if not final_obj:
+        final_obj = doc.addObject("Part::Feature", "final_inlay")
+    final_obj.Shape = fillet
+    final_obj.Label = "final_inlay"
 
     # Recompute document to reflect changes
     doc.recompute()
@@ -284,6 +318,32 @@ def prepare_for_inlay():
         print("No object selected. Please select an object.")
         return
     fillet_for_cnc()
+
+
+def update_all_previews():
+    target_doc = App.ActiveDocument
+    if not target_doc:
+        print("No active cue document to update inlays.")
+        return
+
+    updated = 0
+    for inlay_type in ["forearm", "handle", "butt_sleeve"]:
+        link_name = f"linked_{inlay_type}_Inlay"
+        link_obj = target_doc.getObject(link_name)
+        if not link_obj:
+            continue
+
+        _, source_object = _get_inlay_source_object(inlay_type)
+        if not source_object:
+            print(f"No source inlay object available for '{inlay_type}'.")
+            continue
+
+        link_obj.LinkedObject = source_object
+        updated += 1
+
+    if updated:
+        target_doc.recompute()
+    print(f"Updated {updated} inlay link(s).")
 
 
 
