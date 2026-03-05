@@ -210,10 +210,16 @@ def create_sketch(inlay_type = "handle", inlay_name = None):
     # Position object to part
     lnk = target_doc.getObject(link_name)
     lnk.Placement = App.Placement(App.Vector(0, 0, 0), App.Rotation(App.Vector(0,0,1), 180))
-    lnk.setExpression('.Placement.Base.y', f'{inlay_type}.Placement.Base.y + CueDimensions.{inlay_type}_length')
+
+    anchor_name = f"{inlay_type}_outer" if target_doc.getObject(f"{inlay_type}_outer") else inlay_type
+    if not target_doc.getObject(anchor_name):
+        print(f"Anchor object for '{inlay_type}' was not found.")
+        return
+
+    lnk.setExpression('.Placement.Base.y', f'{anchor_name}.Placement.Base.y + CueDimensions.{inlay_type}_length')
     lnk.setExpression(
         '.Placement.Base.z',
-        f'(CueDimensions.finish_size_startod + ((CueDimensions.finish_size_endod - CueDimensions.finish_size_startod) / CueDimensions.finish_size_length) * ({inlay_type}.Placement.Base.y + CueDimensions.{inlay_type}_length))/2'
+        f'(CueDimensions.finish_size_startod + ((CueDimensions.finish_size_endod - CueDimensions.finish_size_startod) / CueDimensions.finish_size_length) * ({anchor_name}.Placement.Base.y + CueDimensions.{inlay_type}_length))/2'
     )
 
     # Create array of inlays
