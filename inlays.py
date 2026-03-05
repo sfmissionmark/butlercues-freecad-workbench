@@ -263,6 +263,54 @@ def fillet_for_cnc(noise = None):
     fillet_radius_inch = 0.014
     doc = App.ActiveDocument
 
+    def _axis_vector_for_bbox(shape_obj):
+        bbox = shape_obj.BoundBox
+        axes = [
+            (bbox.XLength, App.Vector(1, 0, 0)),
+            (bbox.YLength, App.Vector(0, 1, 0)),
+            (bbox.ZLength, App.Vector(0, 0, 1)),
+        ]
+        axes = [item for item in axes if item[0] > 1e-7]
+        if not axes:
+            return App.Vector(0, 0, 1)
+        axes.sort(key=lambda item: item[0])
+        return axes[0][1]
+
+    def _edges_parallel_to_axis(shape_obj, axis, tol=1e-6):
+        matches = []
+        for edge in shape_obj.Edges:
+            curve = getattr(edge, "Curve", None)
+            if not curve or getattr(curve, "TypeId", "") != "Part::GeomLine":
+                continue
+            if curve.Direction.isParallel(axis, tol):
+                matches.append(edge)
+        return matches
+
+    def _find_matching_edge(shape_obj, reference_edge, axis, length_tol=0.03, center_tol=0.2):
+        ref_len = reference_edge.Length
+        ref_center = reference_edge.CenterOfMass
+        candidates = _edges_parallel_to_axis(shape_obj, axis)
+        if not candidates:
+            return None
+
+        best = None
+        best_score = None
+        for candidate in candidates:
+            if abs(candidate.Length - ref_len) > max(length_tol, ref_len * 0.02):
+                continue
+            center_dist = candidate.CenterOfMass.sub(ref_center).Length
+            if center_dist > center_tol:
+                continue
+            score = abs(candidate.Length - ref_len) + center_dist
+            if best is None or score < best_score:
+                best = candidate
+                best_score = score
+
+        return best
+
+    def _is_valid_shape(shape_obj):
+        return bool(shape_obj) and not shape_obj.isNull() and shape_obj.isValid()
+
     selection = Gui.Selection.getSelection()
     if not selection:
         print("No object selected. Please select an object.")
@@ -279,28 +327,89 @@ def fillet_for_cnc(noise = None):
         return
 
     shape = obj.Shape
+    try:
+        shape = shape.removeSplitter()
+    except Exception:
+        pass
 
     # Convert fillet radius from inches to millimeters
     fillet_radius = fillet_radius_inch * 25.4
 
-    # Identify edges parallel to the Z-axis
-    edge_indices = []
-    for i, edge in enumerate(shape.Edges):
-        if edge.Curve.TypeId == "Part::GeomLine":
-            if edge.Curve.Direction.isParallel(App.Vector(0, 0, 1), 1e-6):
-                edge_indices.append(i + 1)  # Collect edge index
+    preferred_axis = _axis_vector_for_bbox(shape)
+    axis_candidates = [preferred_axis, App.Vector(0, 0, 1), App.Vector(0, 1, 0), App.Vector(1, 0, 0)]
 
-    if not edge_indices:
-        print("No edges parallel to the Z-axis found.")
-        return
+    unique_axes = []
+    for axis in axis_candidates:
+        if not any(axis.isEqual(existing, 1e-7) for existing in unique_axes):
+            unique_axes.append(axis)
 
-    # Apply fillet
-    # fillet = shape.makeFillet(fillet_radius, [shape.Edges[i - 1] for i in edge_indices])
-    try:
-        edges_to_fillet = [shape.Edges[i - 1] for i in edge_indices]
-        fillet = shape.makeFillet(fillet_radius, edges_to_fillet)
-    except Exception as e:
-        print(f"Failed to create fillet: {str(e)}")
+    radius_attempts = [
+        fillet_radius,
+        fillet_radius * 0.9,
+        fillet_radius * 0.8,
+        fillet_radius * 0.7,
+        fillet_radius * 0.6,
+    ]
+
+    fillet = None
+    successful_radius = None
+    used_axis = None
+
+    for axis in unique_axes:
+        edges_to_fillet = _edges_parallel_to_axis(shape, axis)
+        if not edges_to_fillet:
+            continue
+
+        for attempt_radius in radius_attempts:
+            try:
+                candidate = shape.makeFillet(attempt_radius, edges_to_fillet)
+            except Exception:
+                continue
+
+            if _is_valid_shape(candidate):
+                fillet = candidate
+                successful_radius = attempt_radius
+                used_axis = axis
+                break
+
+        if fillet:
+            break
+
+    if not fillet:
+        for axis in unique_axes:
+            reference_edges = _edges_parallel_to_axis(shape, axis)
+            if not reference_edges:
+                continue
+
+            for attempt_radius in radius_attempts:
+                working = shape
+                success_count = 0
+
+                for reference_edge in reference_edges:
+                    target_edge = _find_matching_edge(working, reference_edge, axis)
+                    if not target_edge:
+                        continue
+
+                    try:
+                        candidate = working.makeFillet(attempt_radius, [target_edge])
+                    except Exception:
+                        continue
+
+                    if _is_valid_shape(candidate):
+                        working = candidate
+                        success_count += 1
+
+                if success_count:
+                    fillet = working
+                    successful_radius = attempt_radius
+                    used_axis = axis
+                    break
+
+            if fillet:
+                break
+
+    if not fillet:
+        print("Failed to create fillet: no valid edge/radius combination found.")
         return
 
 
@@ -312,6 +421,9 @@ def fillet_for_cnc(noise = None):
         final_obj = doc.addObject("Part::Feature", "final_inlay")
     final_obj.Shape = fillet
     final_obj.Label = "final_inlay"
+
+    axis_name = "X" if used_axis and used_axis.isEqual(App.Vector(1, 0, 0), 1e-7) else "Y" if used_axis and used_axis.isEqual(App.Vector(0, 1, 0), 1e-7) else "Z"
+    print(f"Fillet created for CNC using {axis_name}-parallel edges at radius {successful_radius / 25.4:.4f} in.")
 
     # Recompute document to reflect changes
     doc.recompute()
