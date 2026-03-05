@@ -336,7 +336,7 @@ def fillet_for_cnc(noise = None):
     fillet_radius = fillet_radius_inch * 25.4
 
     preferred_axis = _axis_vector_for_bbox(shape)
-    axis_candidates = [preferred_axis, App.Vector(0, 0, 1), App.Vector(0, 1, 0), App.Vector(1, 0, 0)]
+    axis_candidates = [App.Vector(0, 0, 1), preferred_axis, App.Vector(0, 1, 0), App.Vector(1, 0, 0)]
 
     unique_axes = []
     for axis in axis_candidates:
