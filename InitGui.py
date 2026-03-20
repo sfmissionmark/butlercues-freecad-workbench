@@ -1,0 +1,92 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import os
+import FreeCAD
+import FreeCADGui
+from FreeCADGui import Workbench
+
+
+
+class MyWorkbench (Workbench):
+
+    MenuText = "Cues"
+    ToolTip = "A description of my workbench"
+    _icon_path = os.path.join("resources", "icons", "bcwb.png")
+    Icon = _icon_path
+
+    def Initialize(self):
+        """This function is executed when the workbench is first activated.
+        It is executed once in a FreeCAD session followed by the Activated function.
+        """
+        #import MyModuleA, MyModuleB # import here all the needed files that create your FreeCAD commands
+        import materials
+        import cues
+        FreeCAD.Console.PrintMessage("[Cues WB v1-2] Initialize with Inlays + CNC\n")
+        
+        self.list = ["Make_Joint_Cap",
+                     "Make_Joint_Ring_Pads",
+                     "Make_Joint_Ring",
+                     "Make_Forearm", 
+                     "Make_Handle", 
+                     "Make_Butt_sleeve",
+                     "Make_Butt_Ring",
+                     "Make_Butt_Ring_Pad",
+                     "Make_Butt_Capp",
+                     "Make_Full_Cue",
+                     ]
+        self.appendToolbar("Cue Commands", self.list) # creates a new toolbar with your commands
+        self.appendMenu("Cues", self.list) # creates a new menu
+
+        self.appendMenu("Materials", []) # creates a new menu
+        for material in materials.materials():
+            self.appendMenu("Materials", material['name'])
+
+        self.appendMenu("Woods", []) # creates a new menu
+        for wood in materials.get_wood_images():
+            self.appendMenu("Woods", wood['name'])
+        self.appendMenu("Woods", "Restore Wood")
+
+        self.appendMenu("Inlays", []) # creates a new menu
+        for i in ["forearm", "handle", "butt_sleeve"]:
+            self.appendMenu("Inlays", f"{i}_inlay")
+        self.appendMenu("Inlays", "Fillet for cnc")
+        self.appendMenu("Inlays", "Update Inlays")
+        self.appendMenu("Inlays", "Cues_Pattern")
+        self.appendMenu("Inlays", "Cues_XUp_Nesting")
+
+        self.appendMenu("CNC", []) # creates a new menu
+        self.appendMenu("CNC", "Cues_XUp_Nesting")
+        self.appendMenu("CNC", "Cues_Section_CAM_Job")
+        self.appendMenu("CNC", "Cues_Pocket_CAM_Job")
+        self.appendToolbar("CNC", ["Cues_XUp_Nesting", "Cues_Section_CAM_Job", "Cues_Pocket_CAM_Job"])
+
+        return
+
+    def Activated(self):
+        """This function is executed whenever the workbench is activated"""
+        import materials
+        materials.restore_wood()
+        return
+
+    def Deactivated(self):
+        """This function is executed whenever the workbench is deactivated"""
+        return
+
+    def ContextMenu(self, recipient):
+        """This function is executed whenever the user right-clicks on screen"""
+        # "recipient" will be either "view" or "tree"
+        import materials
+
+        material_commands = [material['name'] for material in materials.materials()]
+        wood_commands = [wood['name'] for wood in materials.get_wood_images()]
+        material_commands.extend(wood_commands)
+        material_commands.append("Restore Wood")
+        self.appendContextMenu("Materials", material_commands)
+
+    def GetClassName(self): 
+        # This function is mandatory if this is a full Python workbench
+        # This is not a template, the returned string should be exactly "Gui::PythonWorkbench"
+        return "Gui::PythonWorkbench"
+       
+FreeCADGui.addWorkbench(MyWorkbench())
