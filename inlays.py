@@ -2,6 +2,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+
 import FreeCAD as App
 import FreeCADGui as Gui
 import Draft
@@ -10,6 +11,13 @@ import math
 import json
 import time
 import os
+
+# Tuple of 3 bright colors as RGBA floats for `ViewObject.NormalColor`
+_TOOLPATH_COLORS = (
+    (1.0, 0.2, 0.2, 1.0),  # Bright red
+    (0.2, 0.8, 0.2, 1.0),  # Bright green
+    (1.0, 0.87, 0.0, 1.0),  # Golden Yellow
+)
 
 try:
     from PySide import QtGui, QtCore
@@ -30,6 +38,7 @@ def _select_bit_for_profile(profile_data, bit_candidates, min_runtime_threshold=
 
 import materials
 import sketchershapes
+import inlays_document as _inlays_document
 
 
 _butler_container_cleanup_observer = None
@@ -227,259 +236,51 @@ def _attach_pattern_group_view_providers(doc):
 
 
 def _get_inlay_depth_inches(cue_doc, inlay_type, requested_depth_inches=0.2, clearance_inches=0.01):
-    var_set = cue_doc.getObject("CueDimensions") if cue_doc else None
-    if not var_set:
-        return requested_depth_inches
-
-    try:
-        od_mm = getattr(var_set, f"{inlay_type}_od").Value
-        id_mm = getattr(var_set, f"{inlay_type}_id").Value
-    except Exception:
-        return requested_depth_inches
-
-    wall_thickness_inches = max(0.0, (od_mm - id_mm) / 2.0 / 25.4)
-    max_depth_inches = max(0.01, wall_thickness_inches - clearance_inches)
-    clamped_depth = min(requested_depth_inches, max_depth_inches)
-
-    if clamped_depth < requested_depth_inches:
-        print(
-            f"Clamped {inlay_type} inlay depth from {requested_depth_inches:.3f}in to {clamped_depth:.3f}in "
-            f"to stay within wall thickness."
-        )
-
-    return clamped_depth
+    return _inlays_document._get_inlay_depth_inches(
+        cue_doc,
+        inlay_type,
+        requested_depth_inches=requested_depth_inches,
+        clearance_inches=clearance_inches,
+    )
 
 
 def _get_inlay_source_object(inlay_type):
-    source_name = f"{inlay_type}_inlay"
-    try:
-        source_doc = App.getDocument(source_name)
-    except Exception:
-        source_doc = None
-    if not source_doc:
-        return None, None
-
-    source_object = find_object_by_label(source_doc, 'final_inlay')
-    if not source_object:
-        source_object = source_doc.getObject(f'{inlay_type}_pad')
-    return source_doc, source_object
+    return _inlays_document._get_inlay_source_object(inlay_type)
 
 
 def find_object_by_label(doc, label):
-    """Find an object in the document by its label.
-
-    Returns:
-        The object with the specified label if found, otherwise None.
-    """
-    for obj in doc.Objects:
-        if obj.Label == label:
-            return obj
-    return None
+    return _inlays_document.find_object_by_label(doc, label)
 
 
 def _apply_butler_post_defaults(job_obj, post_name="butler_fluidnc", post_args="--tool_change --inch"):
-    if not job_obj:
-        return
-    try:
-        if hasattr(job_obj, "PostProcessor"):
-            job_obj.PostProcessor = post_name
-        if hasattr(job_obj, "PostProcessorArgs"):
-            job_obj.PostProcessorArgs = post_args
-    except Exception as exc:
-        print(f"Warning: unable to set CAM post processor defaults: {exc}")
+    return _inlays_document._apply_butler_post_defaults(
+        job_obj,
+        post_name=post_name,
+        post_args=post_args,
+    )
 
 
 
 def create_inlay_document(inlay_type):
-    """Create a new document for the specified inlay type"""
-    doc = App.ActiveDocument
-    if not doc:
-        print("No active cue document. Please open/create a cue document first.")
-        return
-        
-    doc_name = f"{inlay_type}_inlay"
-    part_object = doc.getObject("handle_part")
-
-    if not doc_name in App.listDocuments().keys():
-        depth_inches = _get_inlay_depth_inches(doc, inlay_type)
-        new_document(doc_name, inlay_type, depth_inches)
-
-    Gui.setActiveDocument(doc)
-
-    create_sketch(inlay_type)
+    return _inlays_document.create_inlay_document(inlay_type)
 
 
 
 def new_document(doc_name, inlay_type, inlay_depth_inches=0.2):
-    doc = App.newDocument(doc_name)
-    doc.Label = doc_name
-    Gui.SendMsgToActiveView("Save")
-
-    #create a Body and Sketch
-    body = doc.addObject('PartDesign::Body', f"{inlay_type}_body")
-    sketch = body.newObject('Sketcher::SketchObject', f"{inlay_type}_sketch")
-
-    if inlay_type == 'handle':
-        sketchershapes.rectangle(sketch, 0.5, 2)
-    elif inlay_type == 'forearm':
-        sketchershapes.triangle(sketch)
-    elif inlay_type == 'butt_sleeve':
-        sketchershapes.rectangle(sketch, 0.5, 2)
-    else:
-        raise ValueError(f"Invalid inlay type: {inlay_type}")
-    
-    sketchershapes.pad_sketch(sketch, inlay_depth_inches)
+    return _inlays_document.new_document(doc_name, inlay_type, inlay_depth_inches=inlay_depth_inches)
 
 
-def draw_stock(cue_document_name = "Unnamed", 
-               inlay_document_name = "butt_sleeve_inlay"):
-    ############################################################################### 
-    # Draw stock for inlay in inlay document possibly can use for gcode later
-    ###############################################################################
-    cue_document = App.getDocument(cue_document_name)
-    var_set = cue_document.getObject("CueDimensions")
-    inlay_document = App.getDocument(inlay_document_name)
-
-    suffix = "_inlay"
-    part_name = inlay_document_name[:-len(suffix)] if inlay_document_name.endswith(suffix) else inlay_document_name
-    height = getattr(var_set, f'{part_name}_length').Value / 25.4  # Convert mm to inches
-    width = getattr(var_set, f'{part_name}_od').Value / 25.4  # Convert mm to inches
-
-    inlay_document.addObject('PartDesign::Body','Pocket')
-    inlay_document.getObject('Pocket').newObject('Sketcher::SketchObject','stock_sketch')
-    sketch = inlay_document.getObject('stock_sketch')
-    sketch.AttachmentSupport = (inlay_document.getObject('XY_Plane001'),[''])
-    sketch.MapMode = 'FlatFace'
-
-    sketchershapes.rectangle(sketch, width, height, 0)
-    
-    inlay_document.getObject('Pocket').newObject('PartDesign::Pad','stock_pad')
-    stock_pad = inlay_document.getObject('stock_pad')
-    stock_pad.Profile = (sketch, ['',])
-    stock_pad.Length = .25 * 25.4
-    stock_pad.TaperAngle = 0.000000
-    stock_pad.UseCustomVector = 0
-    stock_pad.Direction = (0, 0, 1)
-    stock_pad.ReferenceAxis = (sketch, ['N_Axis'])
-    stock_pad.AlongSketchNormal = 1
-    stock_pad.Reversed = 1
-    sketch.Visibility = False
-
-    # inlay_document.purgeTouched()
-    inlay_document.recompute()
-
-    
-
-
-def create_sketch(inlay_type = "handle", inlay_name = None):
-    Gui.SendMsgToActiveView("Save")
-    if not inlay_name:
-        if inlay_type not in ['handle', 'forearm', 'butt_sleeve']:
-            print(f"Invalid inlay type: {inlay_type}")
-            return
-
-    source_name = f"{inlay_type}_inlay"
-    link_name = f"linked_{inlay_type}_Inlay"
-    group_name = f"{inlay_type}_group_inlay"
-
-    source_doc = App.getDocument(source_name)
-    target_doc = App.activeDocument()
-    if not source_doc:
-        print(f"Inlay source document '{source_name}' was not found.")
-        return
-    if not target_doc:
-        print("No active target document.")
-        return
-
-    # Make group for inlay component
-    component_group = target_doc.getObject('CueComponents')
-    if not component_group:
-        print("CueComponents group was not found in the active document.")
-        return
-    group = target_doc.addObject('App::DocumentObjectGroup',group_name)
-    group.Label = group_name.replace('_', ' ').title()
-    group_obj = target_doc.getObject(group_name)
-    if not group_obj:
-        print(f"Failed to create inlay group '{group_name}'.")
-        return
-    component_group.addObject(group_obj)
-
-    # Move group into component group
-    object_names = [obj.Name for obj in component_group.Group]
-
-    # Find the indices of "handle" and "handle_group"
-    try:
-        index_handle = object_names.index(inlay_type)
-        index_handle_group = object_names.index(group_name)
-        # Reorder: Remove "inlay_group" and reinsert it after "inlay"
-        if index_handle_group != index_handle + 1:
-            handle_group_obj = component_group.Group[index_handle_group]
-            component_group.removeObject(handle_group_obj)  # Remove "handle_group"
-            component_group.addObject(handle_group_obj)     # Add it back at the end
-            reordered_list = component_group.Group[:index_handle + 1] + [handle_group_obj] + component_group.Group[index_handle + 1:-1]
-            component_group.Group = reordered_list
-    except ValueError:
-        print(f"Skipping inlay group reorder for '{inlay_type}': expected objects were not found.")
-    #target_doc.getObject(group_name).addObject(target_doc.getObject(inlay_type))
-
-    # create link to inlay object and move to group
-    source_object = find_object_by_label(source_doc, 'final_inlay')
-    if not source_object:
-        source_object = source_doc.getObject(f'{inlay_type}_pad')
-    if not source_object:
-        print(f"No inlay source object found in '{source_name}'.")
-        return
-    target_doc.addObject('App::Link', link_name).LinkedObject = source_object
-    group_obj.addObject(target_doc.getObject(link_name))
-
-    # Position object to part
-    lnk = target_doc.getObject(link_name)
-    lnk.Placement = App.Placement(App.Vector(0, 0, 0), App.Rotation(App.Vector(0,0,1), 180))
-
-    anchor_name = f"{inlay_type}_outer" if target_doc.getObject(f"{inlay_type}_outer") else inlay_type
-    if not target_doc.getObject(anchor_name):
-        print(f"Anchor object for '{inlay_type}' was not found.")
-        return
-
-    lnk.setExpression('.Placement.Base.y', f'{anchor_name}.Placement.Base.y + CueDimensions.{inlay_type}_length')
-    lnk.setExpression(
-        '.Placement.Base.z',
-        f'(CueDimensions.finish_size_startod + ((CueDimensions.finish_size_endod - CueDimensions.finish_size_startod) / CueDimensions.finish_size_length) * ({anchor_name}.Placement.Base.y + CueDimensions.{inlay_type}_length))/2'
+def draw_stock(cue_document_name="Unnamed", inlay_document_name="butt_sleeve_inlay"):
+    return _inlays_document.draw_stock(
+        cue_document_name=cue_document_name,
+        inlay_document_name=inlay_document_name,
     )
 
-    # Create array of inlays
-    array = Draft.make_polar_array(lnk, number=4, angle=360.0, center=App.Vector(0.0, 0.0, 0.0), use_link=True)
-    array.Fuse = False
-    Draft.autogroup(array)
-    array.Axis = (0, 1, 0)
-    array.Label = f"{inlay_type}_inlay_array"
-    group_obj.addObject(array) # cant seem to add name
-    target_doc.recompute()
+    
 
-    # create cut component
-    obj = target_doc.getObject(inlay_type)
-    if not obj:
-        print(f"Target cue component '{inlay_type}' was not found in the active document.")
-        return
-    texture = None
-    if "Texture_URL" in obj.PropertiesList:
-        texture = obj.Texture_URL
-    cut_obj = target_doc.addObject("Part::Cut", f"{inlay_type} with inlay cuts")
-    cut_obj.Tool = array
-    cut_obj.Base = target_doc.getObject(inlay_type)
-    if texture:
-        cut_obj.addProperty("App::PropertyString", "Texture_URL", "Texture", "Texture URL or HDD local path.")
-        cut_obj.Texture_URL = texture
-        materials.restore_wood()
-    group_obj.addObject(cut_obj)
 
-    # create preview inlay
-    cut_obj = target_doc.addObject("Part::Common", f"{inlay_type} inlay previews")
-    cut_obj.Tool = array
-    cut_obj.Base = target_doc.getObject(inlay_type)
-    group_obj.addObject(cut_obj)
-
-    target_doc.recompute()
+def create_sketch(inlay_type="handle", inlay_name=None):
+    return _inlays_document.create_sketch(inlay_type=inlay_type, inlay_name=inlay_name)
 
 
 
@@ -1755,7 +1556,7 @@ def fillet_for_cnc(
                     QtGui.QMessageBox.Ok,
                 )
                 try:
-                    FreeCAD.Console.PrintError(detail_text + "\n")
+                    App.Console.PrintError(detail_text + "\n")
                 except Exception:
                     pass
         except Exception:
@@ -1988,29 +1789,7 @@ def prepare_for_inlay():
 
 
 def update_all_previews():
-    target_doc = App.ActiveDocument
-    if not target_doc:
-        print("No active cue document to update inlays.")
-        return
-
-    updated = 0
-    for inlay_type in ["forearm", "handle", "butt_sleeve"]:
-        link_name = f"linked_{inlay_type}_Inlay"
-        link_obj = target_doc.getObject(link_name)
-        if not link_obj:
-            continue
-
-        _, source_object = _get_inlay_source_object(inlay_type)
-        if not source_object:
-            print(f"No source inlay object available for '{inlay_type}'.")
-            continue
-
-        link_obj.LinkedObject = source_object
-        updated += 1
-
-    if updated:
-        target_doc.recompute()
-    print(f"Updated {updated} inlay link(s).")
+    return _inlays_document.update_all_previews()
 
 
 
@@ -6064,8 +5843,44 @@ def create_section_cnc_job(
         if not outer_edge_groups:
             outer_edge_groups = [[]]
 
+
         created_ops = []
-        for selected_tc in selected_tcs:
+        # Assign a color to each tool controller, up to 3
+        tc_color_map = {}
+        tc_name_color_map = {}
+        for idx, tc in enumerate(selected_tcs):
+            if idx < len(_TOOLPATH_COLORS):
+                tc_color_map[tc] = _TOOLPATH_COLORS[idx]
+                tc_name = str(getattr(tc, "Name", "") or "")
+                if tc_name:
+                    tc_name_color_map[tc_name] = _TOOLPATH_COLORS[idx]
+
+        def _apply_toolpath_normal_color(op_obj, selected_tc):
+            color = tc_color_map.get(selected_tc)
+            if color is None and op_obj is not None:
+                try:
+                    tc_name = str(getattr(getattr(op_obj, "ToolController", None), "Name", "") or "")
+                except Exception:
+                    tc_name = ""
+                if tc_name:
+                    color = tc_name_color_map.get(tc_name)
+            view_obj = getattr(op_obj, "ViewObject", None)
+            if not color or view_obj is None:
+                return
+            try:
+                rgba = tuple(float(c) for c in color)
+                view_obj.NormalColor = rgba
+                for child in list(getattr(op_obj, "OutListRecursive", []) or getattr(op_obj, "OutList", []) or []):
+                    child_view = getattr(child, "ViewObject", None)
+                    if child_view is not None:
+                        try:
+                            child_view.NormalColor = rgba
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        for tc_idx, selected_tc in enumerate(selected_tcs):
             op_specs = []
             for outer_idx, outer_edges in enumerate(outer_edge_groups, start=1):
                 outer_suffix = "" if len(outer_edge_groups) == 1 else f"_Outer{outer_idx}"
@@ -6087,6 +5902,7 @@ def create_section_cnc_job(
                             PathProfileGui.Command.res,
                         )
                         profile_op.ViewObject.Visibility = True
+                        _apply_toolpath_normal_color(profile_op, selected_tc)
                 except Exception:
                     pass
 
@@ -6148,6 +5964,8 @@ def create_section_cnc_job(
                 except Exception:
                     pass
 
+                _apply_toolpath_normal_color(profile_op, selected_tc)
+
                 try:
                     cmds = getattr(getattr(profile_op, "Path", None), "Commands", None)
                     if not cmds or len(cmds) == 0:
@@ -6158,10 +5976,11 @@ def create_section_cnc_job(
 
                 created_ops.append(profile_op)
 
+
         lower_xy_face_subs = _horizontal_face_subnames_below_zero(inlay_obj)
         if lower_xy_face_subs:
             lower_xy_pocket_count = 0
-            for selected_tc in selected_tcs:
+            for tc_idx, selected_tc in enumerate(selected_tcs):
                 pocket_op = _create_pocket_with_selected_tc(_next_name("PocketShape"), job_obj, selected_tc)
                 if not pocket_op:
                     continue
@@ -6173,6 +5992,7 @@ def create_section_cnc_job(
                             PathPocketShapeGui.Command.res,
                         )
                         pocket_op.ViewObject.Visibility = True
+                        _apply_toolpath_normal_color(pocket_op, selected_tc)
                 except Exception:
                     pass
 
@@ -6240,6 +6060,8 @@ def create_section_cnc_job(
                 except Exception:
                     pass
 
+                _apply_toolpath_normal_color(pocket_op, selected_tc)
+
                 try:
                     cmds = getattr(getattr(pocket_op, "Path", None), "Commands", None)
                     if not cmds or len(cmds) == 0:
@@ -6250,6 +6072,38 @@ def create_section_cnc_job(
 
                 lower_xy_pocket_count += 1
                 created_ops.append(pocket_op)
+
+        try:
+            doc.recompute()
+        except Exception:
+            pass
+
+        for created_op in list(created_ops or []):
+            try:
+                _apply_toolpath_normal_color(created_op, getattr(created_op, "ToolController", None))
+            except Exception:
+                pass
+
+        if QtCore is not None and created_ops:
+            created_op_names = [str(getattr(op, "Name", "") or "") for op in created_ops if getattr(op, "Name", None)]
+
+            def _reapply_toolpath_colors_later():
+                try:
+                    for op_name in created_op_names:
+                        try:
+                            live_op = doc.getObject(op_name)
+                        except Exception:
+                            live_op = None
+                        if live_op is not None:
+                            _apply_toolpath_normal_color(live_op, getattr(live_op, "ToolController", None))
+                except Exception:
+                    pass
+
+            try:
+                QtCore.QTimer.singleShot(0, _reapply_toolpath_colors_later)
+                QtCore.QTimer.singleShot(200, _reapply_toolpath_colors_later)
+            except Exception:
+                pass
 
         return created_ops
 
@@ -7327,7 +7181,7 @@ def create_pocket_cnc_job(
         except Exception:
             pass
 
-    def _non_top_face_subnames(model_obj):
+    def _non_top_faces_grouped_by_z(model_obj, z_merge_tol=1e-3):
         try:
             shape = getattr(model_obj, "Shape", None)
             faces = list(getattr(shape, "Faces", []) or [])
@@ -7367,8 +7221,47 @@ def create_pocket_cnc_job(
         max_z = max(z for _, z in xy_faces)
         min_z = min(z for _, z in xy_faces)
 
-        middle_ids = [idx for idx, z in xy_faces if (z < max_z - tol and z > min_z + tol)]
-        return [f"Face{i}" for i in middle_ids]
+        middle_faces = [(idx, z) for idx, z in xy_faces if (z < max_z - tol and z > min_z + tol)]
+        if not middle_faces:
+            return []
+
+        middle_faces.sort(key=lambda item: item[1], reverse=True)
+        levels = []
+        for face_idx, z_val in middle_faces:
+            assigned = False
+            for level in levels:
+                try:
+                    if abs(float(level.get("z_mm", 0.0)) - float(z_val)) <= float(z_merge_tol):
+                        level.setdefault("subs", []).append(f"Face{face_idx}")
+                        assigned = True
+                        break
+                except Exception:
+                    continue
+            if not assigned:
+                levels.append({"z_mm": float(z_val), "subs": [f"Face{face_idx}"]})
+
+        for level in levels:
+            try:
+                level["subs"] = list(dict.fromkeys(level.get("subs", []) or []))
+            except Exception:
+                pass
+
+        levels.sort(key=lambda item: float(item.get("z_mm", 0.0)), reverse=True)
+        cumulative_subs = []
+        for level in reversed(levels):
+            try:
+                new_subs = list(level.get("subs", []) or [])
+                cumulative_subs = list(dict.fromkeys(new_subs + cumulative_subs))
+                level["cumulative_subs"] = list(cumulative_subs)
+            except Exception:
+                level["cumulative_subs"] = list(level.get("subs", []) or [])
+        return levels
+
+    def _non_top_face_subnames(model_obj):
+        out = []
+        for level in _non_top_faces_grouped_by_z(model_obj):
+            out.extend(list(level.get("subs", []) or []))
+        return out
 
     def _create_pocket_op_non_top_faces(
         job_obj,
@@ -7507,16 +7400,52 @@ def create_pocket_cnc_job(
             print(f"Pocket Shape module unavailable: {exc}")
             return []
 
-        face_names = _non_top_face_subnames(model_obj)
-        if not face_names:
+        face_levels = _non_top_faces_grouped_by_z(model_obj)
+        if not face_levels:
             print("No interior XY-plane faces found for Pocket operation.")
             return []
+        face_names = [sub for level in face_levels for sub in (level.get("subs", []) or [])]
 
         try:
             created_ops = []
             roughing_undersize_mm = _inch_to_mm(max(0.0, float(roughing_undersize_inch)))
             glue_oversize_mm = _inch_to_mm(max(0.0, float(glue_oversize_inch)))
             selected_tcs = _selected_tool_controllers(job_obj, selected_tool_names)
+
+            tc_color_map = {}
+            tc_name_color_map = {}
+            for idx, tc in enumerate(selected_tcs):
+                if idx < len(_TOOLPATH_COLORS):
+                    color = _TOOLPATH_COLORS[idx]
+                    tc_color_map[tc] = color
+                    tc_name = str(getattr(tc, "Name", "") or "")
+                    if tc_name:
+                        tc_name_color_map[tc_name] = color
+
+            def _apply_toolpath_normal_color(op_obj, selected_tc):
+                color = tc_color_map.get(selected_tc)
+                if color is None and op_obj is not None:
+                    try:
+                        tc_name = str(getattr(getattr(op_obj, "ToolController", None), "Name", "") or "")
+                    except Exception:
+                        tc_name = ""
+                    if tc_name:
+                        color = tc_name_color_map.get(tc_name)
+                view_obj = getattr(op_obj, "ViewObject", None)
+                if not color or view_obj is None:
+                    return
+                try:
+                    rgba = tuple(float(c) for c in color)
+                    view_obj.NormalColor = rgba
+                    for child in list(getattr(op_obj, "OutListRecursive", []) or getattr(op_obj, "OutList", []) or []):
+                        child_view = getattr(child, "ViewObject", None)
+                        if child_view is not None:
+                            try:
+                                child_view.NormalColor = rgba
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
 
             def _op_has_cut_motion(op_obj):
                 try:
@@ -7539,6 +7468,23 @@ def create_pocket_cnc_job(
                     return float(default)
 
             def _estimate_cut_minutes_for_op(op_obj, tc_obj):
+                try:
+                    cycle_text = str(getattr(op_obj, "CycleTime", "") or "").strip()
+                except Exception:
+                    cycle_text = ""
+
+                if cycle_text and ":" in cycle_text and "error" not in cycle_text.lower():
+                    try:
+                        parts = [int(p) for p in cycle_text.split(":")]
+                        if len(parts) == 3:
+                            h, m, s = parts
+                            return (h * 3600.0 + m * 60.0 + s) / 60.0
+                        if len(parts) == 2:
+                            m, s = parts
+                            return (m * 60.0 + s) / 60.0
+                    except Exception:
+                        pass
+
                 try:
                     cmds_local = list(getattr(getattr(op_obj, "Path", None), "Commands", []) or [])
                 except Exception:
@@ -7607,185 +7553,279 @@ def create_pocket_cnc_job(
             except Exception:
                 pass
 
+            requested_final_mm = -abs(_inch_to_mm(final_depth_inch))
+
             ops_with_cut_motion = 0
             smallest_bit_no_cut_label = None
             total_passes = len(selected_tcs)
-            kept_pass_count = 0
-            for op_index, selected_tc in enumerate(selected_tcs):
-                is_final_pass = (op_index == (total_passes - 1))
-                pocket_op = _create_pocket_with_selected_tc(
-                    _next_name("PocketShape"),
-                    job_obj,
-                    selected_tc,
-                )
-                if not pocket_op:
+            for level_index, level_info in enumerate(face_levels, start=1):
+                level_face_names = list(level_info.get("cumulative_subs", []) or level_info.get("subs", []) or [])
+                if not level_face_names:
                     continue
 
                 try:
-                    if getattr(pocket_op, "ViewObject", None):
-                        pocket_op.ViewObject.Proxy = PathOpGuiBase.ViewProvider(
-                            pocket_op.ViewObject,
-                            PathPocketShapeGui.Command.res,
-                        )
-                        pocket_op.ViewObject.Visibility = True
-                        try:
-                            pocket_op.ViewObject.Proxy.setDeleteObjectsOnReject(False)
-                        except Exception:
-                            pass
+                    level_z_mm = float(level_info.get("z_mm", requested_final_mm))
                 except Exception:
-                    pass
-
-                if selected_tc and hasattr(pocket_op, "ToolController"):
-                    try:
-                        pocket_op.ToolController = selected_tc
-                    except Exception:
-                        pass
+                    level_z_mm = float(requested_final_mm)
+                level_final_mm = max(float(requested_final_mm), float(level_z_mm))
+                kept_pass_count = 0
 
                 try:
-                    bit_part = _bit_name_from_job_or_op(pocket_op, job_obj)
-                    pocket_op.Label = _unique_label(f"PocketShape_{bit_part}")
+                    print(
+                        f"Pocket level {level_index}/{len(face_levels)}: {len(level_face_names)} cumulative face(s), target Z={level_final_mm:.4f} mm."
+                    )
                 except Exception:
                     pass
 
-                pocket_op.Base = [(model_obj, face_names)]
+                for op_index, selected_tc in enumerate(selected_tcs):
+                    is_final_pass = (op_index == (total_passes - 1))
+                    pocket_op = _create_pocket_with_selected_tc(
+                        _next_name("PocketShape"),
+                        job_obj,
+                        selected_tc,
+                    )
+                    if not pocket_op:
+                        continue
 
-                if hasattr(pocket_op, "KeepToolDown"):
                     try:
-                        pocket_op.KeepToolDown = bool(keep_tool_down)
-                    except Exception:
-                        pass
-                if hasattr(pocket_op, "MinTravel"):
-                    try:
-                        pocket_op.MinTravel = bool(min_travel)
-                    except Exception:
-                        pass
-
-                is_first_pass = (op_index == 0)
-                rest_enabled = bool(kept_pass_count > 0)
-                if hasattr(pocket_op, "UseRestMachining"):
-                    try:
-                        pocket_op.UseRestMachining = rest_enabled
-                    except Exception:
-                        pass
-                if hasattr(pocket_op, "RestMachining"):
-                    try:
-                        pocket_op.RestMachining = rest_enabled
+                        if getattr(pocket_op, "ViewObject", None):
+                            pocket_op.ViewObject.Proxy = PathOpGuiBase.ViewProvider(
+                                pocket_op.ViewObject,
+                                PathPocketShapeGui.Command.res,
+                            )
+                            pocket_op.ViewObject.Visibility = True
+                            try:
+                                pocket_op.ViewObject.Proxy.setDeleteObjectsOnReject(False)
+                            except Exception:
+                                pass
+                            _apply_toolpath_normal_color(pocket_op, selected_tc)
                     except Exception:
                         pass
 
-                if hasattr(pocket_op, "ExtraOffset"):
+                    if selected_tc and hasattr(pocket_op, "ToolController"):
+                        try:
+                            pocket_op.ToolController = selected_tc
+                        except Exception:
+                            pass
+
+                    try:
+                        bit_part = _bit_name_from_job_or_op(pocket_op, job_obj)
+                        pocket_op.Label = _unique_label(f"PocketShape_{bit_part}_L{level_index}")
+                    except Exception:
+                        pass
+
+                    pocket_op.Base = [(model_obj, level_face_names)]
+
+                    if hasattr(pocket_op, "KeepToolDown"):
+                        try:
+                            pocket_op.KeepToolDown = bool(keep_tool_down)
+                        except Exception:
+                            pass
+                    if hasattr(pocket_op, "MinTravel"):
+                        try:
+                            pocket_op.MinTravel = bool(min_travel)
+                        except Exception:
+                            pass
+
                     try:
                         if hasattr(pocket_op, "setExpression"):
                             try:
-                                pocket_op.setExpression("ExtraOffset", None)
-                            except Exception:
-                                pass
-                        if (not is_final_pass) and roughing_undersize_mm > 1e-6:
-                            pocket_op.ExtraOffset = f"{roughing_undersize_mm} mm"
-                            try:
-                                print(
-                                    f"Pocket pass {op_index + 1}/{total_passes} ({getattr(pocket_op, 'Label', 'PocketShape')}): "
-                                    f"Rest={rest_enabled}, ExtraOffset={roughing_undersize_mm / 25.4:.4f} in (roughing/undersize)."
-                                )
-                            except Exception:
-                                pass
-                        else:
-                            pocket_op.ExtraOffset = f"{-glue_oversize_mm} mm"
-                            try:
-                                print(
-                                    f"Pocket pass {op_index + 1}/{total_passes} ({getattr(pocket_op, 'Label', 'PocketShape')}): "
-                                    f"Rest={rest_enabled}, ExtraOffset={-glue_oversize_mm / 25.4:.4f} in (finish/glue oversize)."
-                                )
+                                pocket_op.setExpression("FinalDepth", None)
                             except Exception:
                                 pass
                     except Exception:
                         pass
 
-                try:
-                    doc.recompute()
-                except Exception:
-                    pass
-
-                try:
-                    cmds = list(getattr(getattr(pocket_op, "Path", None), "Commands", []) or [])
-                except Exception:
-                    cmds = []
-
-                has_cut_motion = False
-                for cmd in cmds:
                     try:
-                        name = str(getattr(cmd, "Name", "") or "").upper()
-                    except Exception:
-                        name = ""
-                    if name in ("G1", "G2", "G3"):
-                        has_cut_motion = True
-                        break
-
-                if has_cut_motion:
-                    ops_with_cut_motion += 1
-                else:
-                    try:
-                        op_label = str(getattr(pocket_op, "Label", getattr(pocket_op, "Name", "PocketShape")) or "PocketShape")
-                    except Exception:
-                        op_label = "PocketShape"
-                    print(f"'{op_label}' generated no cut moves.")
-                    if is_final_pass:
-                        smallest_bit_no_cut_label = op_label
-
-                skip_this_op = False
-                try:
-                    if (
-                        bool(skip_large_if_under_minutes)
-                        and is_first_pass
-                        and (not is_final_pass)
-                        and has_cut_motion
-                    ):
-                        estimated_minutes = _estimate_cut_minutes_for_op(pocket_op, selected_tc)
-                        threshold_minutes = max(0.0, float(skip_large_minutes_threshold))
-                        if estimated_minutes < threshold_minutes:
-                            skip_this_op = True
+                        if hasattr(pocket_op, "FinalDepth"):
                             try:
-                                op_label = str(getattr(pocket_op, "Label", getattr(pocket_op, "Name", "PocketShape")) or "PocketShape")
+                                pocket_op.FinalDepth = f"{level_final_mm} mm"
                             except Exception:
-                                op_label = "PocketShape"
-                            print(
-                                f"Skipping larger-bit pass '{op_label}' (est. {estimated_minutes:.2f} min < {threshold_minutes:.2f} min)."
-                            )
-                except Exception:
-                    skip_this_op = False
+                                try:
+                                    pocket_op.FinalDepth.Value = float(level_final_mm)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
 
-                if skip_this_op:
+                    rest_enabled = bool(kept_pass_count > 0)
+                    if hasattr(pocket_op, "UseRestMachining"):
+                        try:
+                            pocket_op.UseRestMachining = rest_enabled
+                        except Exception:
+                            pass
+                    if hasattr(pocket_op, "RestMachining"):
+                        try:
+                            pocket_op.RestMachining = rest_enabled
+                        except Exception:
+                            pass
+
+                    if hasattr(pocket_op, "ExtraOffset"):
+                        try:
+                            if hasattr(pocket_op, "setExpression"):
+                                try:
+                                    pocket_op.setExpression("ExtraOffset", None)
+                                except Exception:
+                                    pass
+                            if (not is_final_pass) and roughing_undersize_mm > 1e-6:
+                                pocket_op.ExtraOffset = f"{roughing_undersize_mm} mm"
+                                try:
+                                    print(
+                                        f"Pocket level {level_index} pass {op_index + 1}/{total_passes} ({getattr(pocket_op, 'Label', 'PocketShape')}): "
+                                        f"Rest={rest_enabled}, ExtraOffset={roughing_undersize_mm / 25.4:.4f} in (roughing/undersize)."
+                                    )
+                                except Exception:
+                                    pass
+                            else:
+                                pocket_op.ExtraOffset = f"{-glue_oversize_mm} mm"
+                                try:
+                                    print(
+                                        f"Pocket level {level_index} pass {op_index + 1}/{total_passes} ({getattr(pocket_op, 'Label', 'PocketShape')}): "
+                                        f"Rest={rest_enabled}, ExtraOffset={-glue_oversize_mm / 25.4:.4f} in (finish/glue oversize)."
+                                    )
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
                     try:
-                        if hasattr(pocket_op, "Active"):
-                            pocket_op.Active = False
-                        if getattr(pocket_op, "ViewObject", None):
-                            pocket_op.ViewObject.Visibility = False
+                        doc.recompute()
+                    except Exception:
+                        pass
+
+                    _apply_toolpath_normal_color(pocket_op, selected_tc)
+
+                    try:
+                        cmds = list(getattr(getattr(pocket_op, "Path", None), "Commands", []) or [])
+                    except Exception:
+                        cmds = []
+
+                    has_cut_motion = False
+                    for cmd in cmds:
+                        try:
+                            name = str(getattr(cmd, "Name", "") or "").upper()
+                        except Exception:
+                            name = ""
+                        if name in ("G1", "G2", "G3"):
+                            has_cut_motion = True
+                            break
+
+                    if has_cut_motion:
+                        ops_with_cut_motion += 1
+                    else:
                         try:
                             op_label = str(getattr(pocket_op, "Label", getattr(pocket_op, "Name", "PocketShape")) or "PocketShape")
                         except Exception:
                             op_label = "PocketShape"
-                        print(f"Marked skipped larger-bit pass '{op_label}' as inactive (Active=False).")
-                        doc.recompute()
+                        print(f"'{op_label}' generated no cut moves.")
+                        if is_final_pass:
+                            smallest_bit_no_cut_label = op_label
+                        else:
+                            try:
+                                if hasattr(pocket_op, "Active"):
+                                    pocket_op.Active = False
+                                if getattr(pocket_op, "ViewObject", None):
+                                    pocket_op.ViewObject.Visibility = False
+                                doc.recompute()
+                            except Exception:
+                                pass
+                            continue
+
+                    skip_this_op = False
+                    try:
+                        if (
+                            bool(skip_large_if_under_minutes)
+                            and (not is_final_pass)
+                            and has_cut_motion
+                        ):
+                            estimated_minutes = _estimate_cut_minutes_for_op(pocket_op, selected_tc)
+                            threshold_minutes = max(0.0, float(skip_large_minutes_threshold))
+                            try:
+                                op_label = str(getattr(pocket_op, "Label", getattr(pocket_op, "Name", "PocketShape")) or "PocketShape")
+                            except Exception:
+                                op_label = "PocketShape"
+                            try:
+                                cycle_text = str(getattr(pocket_op, "CycleTime", "") or "").strip()
+                                has_cycle_estimate = bool(cycle_text and ":" in cycle_text and "error" not in cycle_text.lower())
+                            except Exception:
+                                has_cycle_estimate = False
+                            try:
+                                print(
+                                    f"Pocket pass runtime estimate for '{op_label}': {estimated_minutes:.2f} min (threshold {threshold_minutes:.2f} min, source={'CycleTime' if has_cycle_estimate else 'distance-feed fallback'})."
+                                )
+                            except Exception:
+                                pass
+                            if estimated_minutes < threshold_minutes:
+                                skip_this_op = True
+                                try:
+                                    op_label = str(getattr(pocket_op, "Label", getattr(pocket_op, "Name", "PocketShape")) or "PocketShape")
+                                except Exception:
+                                    op_label = "PocketShape"
+                                print(
+                                    f"Skipping larger-bit pass '{op_label}' (est. {estimated_minutes:.2f} min < {threshold_minutes:.2f} min)."
+                                )
+                    except Exception:
+                        skip_this_op = False
+
+                    if skip_this_op:
+                        try:
+                            if hasattr(pocket_op, "Active"):
+                                pocket_op.Active = False
+                            if getattr(pocket_op, "ViewObject", None):
+                                pocket_op.ViewObject.Visibility = False
+                            try:
+                                op_label = str(getattr(pocket_op, "Label", getattr(pocket_op, "Name", "PocketShape")) or "PocketShape")
+                            except Exception:
+                                op_label = "PocketShape"
+                            print(f"Marked skipped larger-bit pass '{op_label}' as inactive (Active=False).")
+                            doc.recompute()
+                        except Exception:
+                            pass
+                        continue
+
+                    try:
+                        if getattr(pocket_op, "ViewObject", None):
+                            pocket_op.ViewObject.Visibility = True
                     except Exception:
                         pass
-                    continue
 
-                try:
-                    if getattr(pocket_op, "ViewObject", None):
-                        pocket_op.ViewObject.Visibility = True
-                except Exception:
-                    pass
-
-                created_ops.append(pocket_op)
-                kept_pass_count += 1
+                    created_ops.append(pocket_op)
+                    kept_pass_count += 1
 
             if created_ops:
                 try:
                     doc.recompute()
                 except Exception:
                     pass
+
+                for created_op in list(created_ops or []):
+                    try:
+                        _apply_toolpath_normal_color(created_op, getattr(created_op, "ToolController", None))
+                    except Exception:
+                        pass
+
+                if QtCore is not None:
+                    created_op_names = [str(getattr(op, "Name", "") or "") for op in created_ops if getattr(op, "Name", None)]
+
+                    def _reapply_toolpath_colors_later():
+                        try:
+                            for op_name in created_op_names:
+                                try:
+                                    live_op = doc.getObject(op_name)
+                                except Exception:
+                                    live_op = None
+                                if live_op is not None:
+                                    _apply_toolpath_normal_color(live_op, getattr(live_op, "ToolController", None))
+                        except Exception:
+                            pass
+
+                    try:
+                        QtCore.QTimer.singleShot(0, _reapply_toolpath_colors_later)
+                        QtCore.QTimer.singleShot(200, _reapply_toolpath_colors_later)
+                    except Exception:
+                        pass
                 print(
-                    f"Created {len(created_ops)} Pocket operation(s) on {len(face_names)} interior XY-plane face(s)."
+                    f"Created {len(created_ops)} Pocket operation(s) across {len(face_levels)} level(s) and {len(face_names)} interior XY-plane face(s)."
                 )
                 if ops_with_cut_motion != len(created_ops):
                     print(f"Pocket passes with cutting moves: {ops_with_cut_motion}/{len(created_ops)}.")
