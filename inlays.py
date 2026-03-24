@@ -167,6 +167,9 @@ def create_section_cnc_job(
     profile_keep_tool_down_override=None,
     profile_min_travel_override=None,
     profile_flip_x_axis_override=None,
+    profile_glue_clearance_override=None,
+    split_solids_to_docs_override=None,
+    parent_group_override=None,
 ):
     doc = App.ActiveDocument
     if not doc:
@@ -291,6 +294,24 @@ def create_section_cnc_job(
         _set_prop_length(stock, "ExtYpos", 0.0)
         _set_prop_length(stock, "ExtZneg", 0.0)
         _set_prop_length(stock, "ExtZpos", 0.0)
+
+    def _set_job_fixtures(job_obj, fixtures):
+        if not job_obj:
+            return
+        try:
+            if hasattr(job_obj, "Fixtures"):
+                job_obj.Fixtures = list(fixtures or [])
+        except Exception:
+            pass
+
+    def _set_job_fixtures(job_obj, fixtures):
+        if not job_obj:
+            return
+        try:
+            if hasattr(job_obj, "Fixtures"):
+                job_obj.Fixtures = list(fixtures or [])
+        except Exception:
+            pass
 
     def _move_job_to_document_root(job_obj):
         if not job_obj:
@@ -441,6 +462,241 @@ def create_section_cnc_job(
 
         return candidates
 
+    def _sanitize_name_token(text):
+        token = "".join(ch if str(ch).isalnum() else "_" for ch in str(text or "")).strip("_")
+        return token or "InlaySolid"
+
+    def _copy_fillet_marker_properties(src_obj, dst_obj):
+        if not src_obj or not dst_obj:
+            return
+        markers = (
+            ("FilletRadiusInch", "App::PropertyFloat", 0.0),
+            ("FilletSettingsSummary", "App::PropertyString", ""),
+            ("FilletSourceLabels", "App::PropertyString", ""),
+            ("FilletRequireFullCoverage", "App::PropertyBool", False),
+        )
+        for prop_name, prop_type, default_value in markers:
+            try:
+                if not hasattr(dst_obj, prop_name):
+                    dst_obj.addProperty(prop_type, prop_name, "ButlerCues")
+            except Exception:
+                continue
+            try:
+                value = getattr(src_obj, prop_name, default_value)
+            except Exception:
+                value = default_value
+            try:
+                setattr(dst_obj, prop_name, value)
+            except Exception:
+                pass
+
+    def _split_solids_to_groups_and_create_jobs(
+        source_obj,
+        selected_template,
+        selected_tool_names,
+        keep_tool_down,
+        min_travel,
+        flip_x_axis,
+        glue_clearance_in,
+    ):
+        if not source_obj:
+            return False
+        try:
+            source_shape = getattr(source_obj, "Shape", None)
+            solids = list(getattr(source_shape, "Solids", []) or [])
+        except Exception:
+            solids = []
+
+        def _solid_bb_tuple(solid_obj):
+            try:
+                bb = getattr(solid_obj, "BoundBox", None)
+                if not bb:
+                    return None
+                return (
+                    float(bb.XMin),
+                    float(bb.YMin),
+                    float(bb.ZMin),
+                    float(bb.XMax),
+                    float(bb.YMax),
+                    float(bb.ZMax),
+                )
+            except Exception:
+                return None
+
+        def _solid_volume(solid_obj):
+            try:
+                return abs(float(getattr(solid_obj, "Volume", 0.0) or 0.0))
+            except Exception:
+                return 0.0
+
+        def _almost_equal(a, b, tol):
+            try:
+                return abs(float(a) - float(b)) <= float(tol)
+            except Exception:
+                return False
+
+        def _solid_entries_equal(entry_a, entry_b):
+            va = float(entry_a.get("volume", 0.0) or 0.0)
+            vb = float(entry_b.get("volume", 0.0) or 0.0)
+            if max(va, vb) > 0.0:
+                if abs(va - vb) / max(va, vb) > 1e-3:
+                    return False
+
+            bba = entry_a.get("bb")
+            bbb = entry_b.get("bb")
+            if bba is not None and bbb is not None:
+                span = max(
+                    abs(float(bba[3]) - float(bba[0])),
+                    abs(float(bba[4]) - float(bba[1])),
+                    abs(float(bba[5]) - float(bba[2])),
+                    abs(float(bbb[3]) - float(bbb[0])),
+                    abs(float(bbb[4]) - float(bbb[1])),
+                    abs(float(bbb[5]) - float(bbb[2])),
+                    1.0,
+                )
+                tol = span * 1e-6
+                for idx in range(6):
+                    if not _almost_equal(bba[idx], bbb[idx], tol):
+                        return False
+
+            try:
+                if bool(getattr(entry_a.get("solid"), "isSame", lambda _: False)(entry_b.get("solid"))):
+                    return True
+            except Exception:
+                pass
+
+            return True
+
+        solid_entries = []
+        for solid in solids:
+            solid_entries.append(
+                {
+                    "solid": solid,
+                    "volume": _solid_volume(solid),
+                    "bb": _solid_bb_tuple(solid),
+                }
+            )
+
+        unique_entries = []
+        duplicate_count = 0
+        for entry in solid_entries:
+            is_dup = False
+            for existing in unique_entries:
+                if _solid_entries_equal(entry, existing):
+                    is_dup = True
+                    break
+            if is_dup:
+                duplicate_count += 1
+            else:
+                unique_entries.append(entry)
+
+        if duplicate_count > 0:
+            try:
+                print(f"Ignoring {duplicate_count} duplicate solid(s) while splitting inlay.")
+            except Exception:
+                pass
+
+        solids = [entry.get("solid") for entry in unique_entries if entry.get("solid") is not None]
+
+        solid_entries = []
+        for solid in solids:
+            try:
+                vol = abs(float(getattr(solid, "Volume", 0.0) or 0.0))
+            except Exception:
+                vol = 0.0
+            solid_entries.append((solid, vol))
+
+        positive_volumes = [vol for _, vol in solid_entries if vol > 0.0]
+        if positive_volumes:
+            max_volume = max(positive_volumes)
+            min_keep_volume = max(1e-9, max_volume * 0.001)
+            filtered_solids = [solid for solid, vol in solid_entries if vol >= min_keep_volume]
+            if filtered_solids and len(filtered_solids) != len(solids):
+                dropped = len(solids) - len(filtered_solids)
+                try:
+                    print(
+                        f"Ignoring {dropped} tiny solid(s) while splitting inlay "
+                        f"(volume threshold: {min_keep_volume:.6g})."
+                    )
+                except Exception:
+                    pass
+                solids = filtered_solids
+
+        if len(solids) <= 1:
+            return False
+
+        source_label = str(getattr(source_obj, "Label", getattr(source_obj, "Name", "Inlay")) or "Inlay")
+        source_name = str(getattr(source_obj, "Name", "Inlay") or "Inlay")
+        created_jobs = 0
+
+        split_root_group = None
+        try:
+            split_root_group = doc.addObject("App::DocumentObjectGroup", _next_name("InlaySplit"))
+            split_root_group.Label = "Inlays"
+            try:
+                inlays_parent = doc.getObject("Inlays")
+                if inlays_parent and hasattr(inlays_parent, "addObject"):
+                    inlays_parent.addObject(split_root_group)
+            except Exception:
+                pass
+        except Exception:
+            split_root_group = None
+
+        for idx, solid in enumerate(solids, start=1):
+            try:
+                solid_shape = solid.copy()
+            except Exception:
+                solid_shape = solid
+            if not solid_shape:
+                continue
+
+            try:
+                solid_obj = doc.addObject("Part::Feature", _next_name(f"{_sanitize_name_token(source_name)}Solid"))
+                solid_obj.Label = f"{source_label} Solid {idx}"
+                solid_obj.Shape = solid_shape
+                _copy_fillet_marker_properties(source_obj, solid_obj)
+                try:
+                    if hasattr(solid_obj, "Refine"):
+                        solid_obj.Refine = True
+                except Exception:
+                    pass
+
+                per_solid_group = None
+                try:
+                    per_solid_group = doc.addObject("App::DocumentObjectGroup", _next_name("InlaySolidGroup"))
+                    per_solid_group.Label = f"{source_label} Solid {idx}"
+                    if split_root_group and hasattr(split_root_group, "addObject"):
+                        split_root_group.addObject(per_solid_group)
+                    if per_solid_group and hasattr(per_solid_group, "addObject"):
+                        per_solid_group.addObject(solid_obj)
+                except Exception:
+                    per_solid_group = None
+
+                doc.recompute()
+
+                create_section_cnc_job(
+                    target=solid_obj,
+                    template_path=selected_template or None,
+                    show_dialog=False,
+                    selected_tool_names_override=selected_tool_names,
+                    profile_flip_x_axis_override=flip_x_axis,
+                    profile_keep_tool_down_override=keep_tool_down,
+                    profile_min_travel_override=min_travel,
+                    profile_glue_clearance_override=glue_clearance_in,
+                    split_solids_to_docs_override=False,
+                    parent_group_override=per_solid_group,
+                )
+                created_jobs += 1
+            except Exception as exc:
+                print(f"Failed to create split-solid inlay CAM job {idx}: {exc}")
+
+        if created_jobs > 0:
+            print(
+                f"Split '{source_label}' into {created_jobs} solid group(s) and created separate Inlay Job(s)."
+            )
+            return True
+        return False
+
     candidates = _section_candidates()
     if not candidates:
         print("No valid section object found for CAM Job.")
@@ -574,7 +830,7 @@ def create_section_cnc_job(
         )
         return options
 
-    def _create_auto_container(original_obj, created_items, final_depth_in=None, settings=None):
+    def _create_auto_container(original_obj, created_items, final_depth_in=None, settings=None, parent_group=None):
         def _ensure_parent_group(preferred_label):
             try:
                 for obj in (getattr(doc, "Objects", []) or []):
@@ -607,9 +863,11 @@ def create_section_cnc_job(
             depth_suffix = ""
         container.Label = f"{original_name} inlay{depth_suffix}"
         try:
-            parent_group = _ensure_parent_group("Inlays")
-            if parent_group:
-                parent_group.addObject(container)
+            container_parent = parent_group
+            if not container_parent:
+                container_parent = _ensure_parent_group("Inlays")
+            if container_parent and hasattr(container_parent, "addObject"):
+                container_parent.addObject(container)
         except Exception:
             pass
         for item in created_items:
@@ -779,9 +1037,11 @@ def create_section_cnc_job(
     nest_rotate_180 = True
     inlay_final_depth_in = 0.200
     nest_gap_in = 0.080
+    profile_glue_clearance_in = 0.0
     profile_keep_tool_down = True
     profile_min_travel = True
     profile_flip_x_axis = False
+    split_solids_to_docs = False
     try:
         inlay_prefs = App.ParamGet("User parameter:BaseApp/Preferences/Mod/ButlerCues/InlayJob")
         inlay_count = max(1, int(inlay_prefs.GetInt("inlay_count", 1)))
@@ -796,15 +1056,18 @@ def create_section_cnc_job(
         profile_keep_tool_down = bool(inlay_prefs.GetBool("profile_keep_tool_down", True))
         profile_min_travel = bool(inlay_prefs.GetBool("profile_min_travel", True))
         profile_flip_x_axis = bool(inlay_prefs.GetBool("profile_flip_x_axis", False))
+        split_solids_to_docs = bool(inlay_prefs.GetBool("split_solids_to_docs", False))
     except Exception:
         inlay_prefs = None
         inlay_count = 1
         nest_rotate_180 = True
         inlay_final_depth_in = 0.200
         nest_gap_in = 0.080
+        profile_glue_clearance_in = 0.0
         profile_keep_tool_down = True
         profile_min_travel = True
         profile_flip_x_axis = False
+        split_solids_to_docs = False
 
     if profile_keep_tool_down_override is not None:
         try:
@@ -821,6 +1084,16 @@ def create_section_cnc_job(
             profile_flip_x_axis = bool(profile_flip_x_axis_override)
         except Exception:
             profile_flip_x_axis = False
+    if profile_glue_clearance_override is not None:
+        try:
+            profile_glue_clearance_in = float(profile_glue_clearance_override)
+        except Exception:
+            profile_glue_clearance_in = 0.0
+    if split_solids_to_docs_override is not None:
+        try:
+            split_solids_to_docs = bool(split_solids_to_docs_override)
+        except Exception:
+            split_solids_to_docs = False
 
     if show_dialog and QtGui is not None and Gui is not None:
         default_template = ""
@@ -911,6 +1184,12 @@ def create_section_cnc_job(
                 self.nest_gap_spin.setSingleStep(0.005)
                 self.nest_gap_spin.setValue(float(nest_gap_in))
 
+                self.glue_clearance_spin = QtGui.QDoubleSpinBox()
+                self.glue_clearance_spin.setDecimals(4)
+                self.glue_clearance_spin.setRange(0.0, 0.1)
+                self.glue_clearance_spin.setSingleStep(0.0005)
+                self.glue_clearance_spin.setValue(float(profile_glue_clearance_in))
+
                 self.rotate_xup_check = QtGui.QCheckBox("Alternate 180° rotation for nesting")
                 self.rotate_xup_check.setChecked(bool(nest_rotate_180))
                 self.keep_tool_down_check = QtGui.QCheckBox("Keep tool down")
@@ -919,6 +1198,8 @@ def create_section_cnc_job(
                 self.min_travel_check.setChecked(bool(profile_min_travel))
                 self.flip_x_axis_check = QtGui.QCheckBox("Flip Z axis")
                 self.flip_x_axis_check.setChecked(bool(profile_flip_x_axis))
+                self.split_solids_check = QtGui.QCheckBox("Create separate CAM job/group for each solid")
+                self.split_solids_check.setChecked(bool(split_solids_to_docs))
 
                 self.tool_checkboxes = []
                 bit_widget = QtGui.QWidget()
@@ -1026,8 +1307,10 @@ def create_section_cnc_job(
                 layout.addRow("Inlay count (X-up)", self.inlay_count_spin)
                 layout.addRow("Final depth (in)", self.final_depth_spin)
                 layout.addRow("Nesting gap (in)", self.nest_gap_spin)
+                layout.addRow("Glue clearance (in)", self.glue_clearance_spin)
                 layout.addRow("Packing", self.rotate_xup_check)
                 layout.addRow("Orientation", self.flip_x_axis_check)
+                layout.addRow("Split solids", self.split_solids_check)
                 layout.addRow("Keep Tool Down", self.keep_tool_down_check)
                 layout.addRow("Min Travel", self.min_travel_check)
                 layout.addRow("Bits", bit_widget)
@@ -1041,8 +1324,10 @@ def create_section_cnc_job(
                     self.inlay_count_spin.valueChanged.connect(self._mark_dirty)
                     self.final_depth_spin.valueChanged.connect(self._mark_dirty)
                     self.nest_gap_spin.valueChanged.connect(self._mark_dirty)
+                    self.glue_clearance_spin.valueChanged.connect(self._mark_dirty)
                     self.rotate_xup_check.toggled.connect(self._mark_dirty)
                     self.flip_x_axis_check.toggled.connect(self._mark_dirty)
+                    self.split_solids_check.toggled.connect(self._mark_dirty)
                     self.keep_tool_down_check.toggled.connect(self._mark_dirty)
                     self.min_travel_check.toggled.connect(self._mark_dirty)
                 except Exception:
@@ -1079,6 +1364,10 @@ def create_section_cnc_job(
                 except Exception:
                     nest_gap = 0.08
                 try:
+                    glue_clearance = round(float(self.glue_clearance_spin.value()), 6)
+                except Exception:
+                    glue_clearance = 0.0
+                try:
                     rotate_180 = bool(self.rotate_xup_check.isChecked())
                 except Exception:
                     rotate_180 = True
@@ -1094,6 +1383,10 @@ def create_section_cnc_job(
                     flip_x_axis = bool(self.flip_x_axis_check.isChecked())
                 except Exception:
                     flip_x_axis = False
+                try:
+                    split_solids = bool(self.split_solids_check.isChecked())
+                except Exception:
+                    split_solids = False
                 try:
                     selected_bits = tuple(
                         sorted(
@@ -1112,8 +1405,10 @@ def create_section_cnc_job(
                     count,
                     final_depth,
                     nest_gap,
+                    glue_clearance,
                     rotate_180,
                     flip_x_axis,
+                    split_solids,
                     keep_tool_down,
                     min_travel,
                     selected_bits,
@@ -1147,8 +1442,13 @@ def create_section_cnc_job(
                     selected_nest_gap = max(0.0, float(self.nest_gap_spin.value()))
                 except Exception:
                     selected_nest_gap = 0.080
+                try:
+                    selected_glue_clearance = float(self.glue_clearance_spin.value())
+                except Exception:
+                    selected_glue_clearance = 0.0
                 selected_rotate = bool(self.rotate_xup_check.isChecked())
                 selected_flip_x_axis = bool(self.flip_x_axis_check.isChecked())
+                selected_split_solids = bool(self.split_solids_check.isChecked())
                 selected_keep_tool_down = bool(self.keep_tool_down_check.isChecked())
                 selected_min_travel = bool(self.min_travel_check.isChecked())
 
@@ -1160,6 +1460,7 @@ def create_section_cnc_job(
                         inlay_prefs.SetFloat("final_depth_in", float(selected_final_depth))
                         inlay_prefs.SetFloat("nest_gap_in", float(selected_nest_gap))
                         inlay_prefs.SetBool("profile_flip_x_axis", bool(selected_flip_x_axis))
+                        inlay_prefs.SetBool("split_solids_to_docs", bool(selected_split_solids))
                         inlay_prefs.SetBool("profile_keep_tool_down", bool(selected_keep_tool_down))
                         inlay_prefs.SetBool("profile_min_travel", bool(selected_min_travel))
                 except Exception:
@@ -1207,6 +1508,8 @@ def create_section_cnc_job(
                         profile_flip_x_axis_override=selected_flip_x_axis,
                         profile_keep_tool_down_override=selected_keep_tool_down,
                         profile_min_travel_override=selected_min_travel,
+                        profile_glue_clearance_override=selected_glue_clearance,
+                        split_solids_to_docs_override=selected_split_solids,
                     )
                     self._last_run_signature = current_signature
                 finally:
@@ -1243,6 +1546,21 @@ def create_section_cnc_job(
     if effective_template_path and not os.path.exists(effective_template_path):
         print(f"Template not found: {effective_template_path}")
         return
+
+    if bool(split_solids_to_docs):
+        did_split = _split_solids_to_groups_and_create_jobs(
+            target_obj,
+            effective_template_path,
+            selected_tool_names_override,
+            profile_keep_tool_down,
+            profile_min_travel,
+            profile_flip_x_axis,
+            profile_glue_clearance_in,
+        )
+        if did_split:
+            _record_undo_cleanup_bundle()
+            return
+        print("Split-solids option enabled, but target resolved to one usable solid; creating a single Inlay Job.")
 
     # Inlay Job uses selected inlay geometry directly (or X-up model when count > 1).
 
@@ -1817,6 +2135,7 @@ def create_section_cnc_job(
         inlay_obj,
         selected_tool_names=None,
         final_depth_inch=0.200,
+        glue_clearance_inch=0.0,
         strict_selection=False,
         keep_tool_down=True,
         min_travel=True,
@@ -1977,8 +2296,19 @@ def create_section_cnc_job(
                         edge_names_local.append(found)
                 return list(dict.fromkeys(edge_names_local))
 
+            def _wire_area(wire_obj):
+                try:
+                    return abs(float(Part.Face(wire_obj).Area))
+                except Exception:
+                    try:
+                        bb = wire_obj.BoundBox
+                        return abs(float(bb.XLength) * float(bb.YLength))
+                    except Exception:
+                        return 0.0
+
             outer_groups = []
             inner_groups = []
+
             for top_face in top_faces:
                 try:
                     wires = list(getattr(top_face, "Wires", []) or [])
@@ -1987,11 +2317,18 @@ def create_section_cnc_job(
                 if not wires:
                     continue
 
-                outer_names = _wire_to_edge_names(wires[0])
+                try:
+                    outer_wire = max(wires, key=_wire_area)
+                except Exception:
+                    outer_wire = wires[0]
+
+                outer_names = _wire_to_edge_names(outer_wire)
                 if outer_names:
                     outer_groups.append(outer_names)
 
-                for wire in wires[1:]:
+                for wire in wires:
+                    if wire is outer_wire:
+                        continue
                     inner_names = _wire_to_edge_names(wire)
                     if inner_names:
                         inner_groups.append(inner_names)
@@ -2080,7 +2417,6 @@ def create_section_cnc_job(
             for outer_idx, outer_edges in enumerate(outer_edge_groups, start=1):
                 outer_suffix = "" if len(outer_edge_groups) == 1 else f"_Outer{outer_idx}"
                 op_specs.append(("Outside", outer_edges, outer_suffix))
-            # Only apply inside pocketing to detected holes
             if inner_hole_edge_groups:
                 for hole_idx, edge_group in enumerate(inner_hole_edge_groups, start=1):
                     op_specs.append(("Inside", edge_group, f"_Hole{hole_idx}"))
@@ -2135,6 +2471,18 @@ def create_section_cnc_job(
                     except Exception:
                         pass
 
+                if hasattr(profile_op, "ExtraOffset"):
+                    try:
+                        if hasattr(profile_op, "setExpression"):
+                            try:
+                                profile_op.setExpression("ExtraOffset", None)
+                            except Exception:
+                                pass
+                        glue_offset_mm = -abs(_inch_to_mm(float(glue_clearance_inch)))
+                        profile_op.ExtraOffset = f"{glue_offset_mm} mm"
+                    except Exception:
+                        pass
+
                 try:
                     if hasattr(profile_op, "setExpression"):
                         profile_op.setExpression("FinalDepth", None)
@@ -2173,12 +2521,10 @@ def create_section_cnc_job(
 
 
         lower_xy_face_subs = _horizontal_face_subnames_below_zero(inlay_obj)
-        if lower_xy_face_subs:
-            lower_xy_pocket_count = 0
-            for tc_idx, selected_tc in enumerate(selected_tcs):
-                pocket_op = _create_pocket_with_selected_tc(_next_name("PocketShape"), job_obj, selected_tc)
-                if not pocket_op:
-                    continue
+        if lower_xy_face_subs and selected_tcs:
+            selected_tc = selected_tcs[0]
+            pocket_op = _create_pocket_with_selected_tc(_next_name("PocketShape"), job_obj, selected_tc)
+            if pocket_op:
 
                 try:
                     if getattr(pocket_op, "ViewObject", None):
@@ -2207,15 +2553,14 @@ def create_section_cnc_job(
                 except Exception:
                     pass
 
-                rest_enabled = bool(lower_xy_pocket_count > 0)
                 if hasattr(pocket_op, "UseRestMachining"):
                     try:
-                        pocket_op.UseRestMachining = rest_enabled
+                        pocket_op.UseRestMachining = False
                     except Exception:
                         pass
                 if hasattr(pocket_op, "RestMachining"):
                     try:
-                        pocket_op.RestMachining = rest_enabled
+                        pocket_op.RestMachining = False
                     except Exception:
                         pass
 
@@ -2261,12 +2606,10 @@ def create_section_cnc_job(
                     cmds = getattr(getattr(pocket_op, "Path", None), "Commands", None)
                     if not cmds or len(cmds) == 0:
                         print(f"Pocket path failed for '{getattr(pocket_op, 'Label', pocket_op.Name)}'.")
-                        continue
+                    else:
+                        created_ops.append(pocket_op)
                 except Exception:
-                    pass
-
-                lower_xy_pocket_count += 1
-                created_ops.append(pocket_op)
+                    created_ops.append(pocket_op)
 
         try:
             doc.recompute()
@@ -2351,6 +2694,7 @@ def create_section_cnc_job(
             pass
 
         _apply_butler_post_defaults(job_live)
+        _set_job_fixtures(job_live, ["G54"])
         _sanitize_job_stock(job_live, profile_base_obj)
         selected_tool_names = _select_tool_names_for_inlay(job_live, selected_tool_names_override)
         created_profile_ops = _create_profile_ops_for_inlay(
@@ -2358,6 +2702,7 @@ def create_section_cnc_job(
             profile_base_obj,
             selected_tool_names,
             inlay_final_depth_in,
+            profile_glue_clearance_in,
             strict_selection=bool(selected_tool_names_override),
             keep_tool_down=bool(profile_keep_tool_down),
             min_travel=bool(profile_min_travel),
@@ -2370,10 +2715,13 @@ def create_section_cnc_job(
             "InlayCount": int(inlay_count),
             "NestRotate180": bool(nest_rotate_180),
             "FinalDepthIn": float(inlay_final_depth_in),
+            "GlueClearanceIn": float(profile_glue_clearance_in),
             "NestGapIn": float(nest_gap_in),
             "KeepToolDown": bool(profile_keep_tool_down),
             "MinTravel": bool(profile_min_travel),
             "FlipXAxis": bool(profile_flip_x_axis),
+            "SplitSolidsToDocs": bool(split_solids_to_docs),
+            "Fixture": "G54",
         }
 
         auto_container = _create_auto_container(
@@ -2381,6 +2729,7 @@ def create_section_cnc_job(
             xup_created_items + [job_live],
             inlay_final_depth_in,
             settings=inlay_settings,
+            parent_group=parent_group_override,
         )
         _expand_container_in_tree(auto_container)
         _expand_targets_in_tree([job_live] + list(created_profile_ops or []))
@@ -3030,6 +3379,17 @@ def create_pocket_cnc_job(
         _set_prop_length(stock, "ExtYpos", 0.0)
         _set_prop_length(stock, "ExtZneg", 0.0)
         _set_prop_length(stock, "ExtZpos", 0.0)
+
+    def _set_job_fixtures(job_obj, fixtures):
+        if not job_obj or fixtures is None:
+            return
+        try:
+            if hasattr(job_obj, "Fixture"):
+                job_obj.Fixture = fixtures
+            elif hasattr(job_obj, "Fixtures"):
+                job_obj.Fixtures = fixtures
+        except Exception:
+            pass
 
     def _create_pocket_job_model_from_inlay(inlay_obj):
         if not inlay_obj:
@@ -5079,6 +5439,7 @@ def create_pocket_cnc_job(
             job = PathGuiJob.Create(job_models, effective_template_path or None, openTaskPanel=False)
             job_name = getattr(job, "Name", None)
             _apply_butler_post_defaults(job)
+            _set_job_fixtures(job, ["G59"])
             _set_pocket_job_label(job)
         finally:
             if active_view is not None:
@@ -5171,6 +5532,7 @@ def create_pocket_cnc_job(
                     job_live = recovered_job
                     job_name = getattr(recovered_job, "Name", job_name)
                     _apply_butler_post_defaults(job_live)
+                    _set_job_fixtures(job_live, ["G59"])
                     _set_pocket_job_label(job_live)
                     _set_stock_to_model_bounds(job_live)
                     _sanitize_job_stock(job_live, pocket_job_model)
@@ -5211,6 +5573,7 @@ def create_pocket_cnc_job(
                 "SkipLargeBitMinMinutes": float(pocket_skip_large_minutes_threshold),
                 "KeepToolDown": bool(pocket_keep_tool_down),
                 "MinTravel": bool(pocket_min_travel),
+                "Fixture": "G59",
             }
             auto_container = _create_auto_container(
                 target_obj,
@@ -5239,6 +5602,7 @@ def create_pocket_cnc_job(
             "SkipLargeBitMinMinutes": float(pocket_skip_large_minutes_threshold),
             "KeepToolDown": bool(pocket_keep_tool_down),
             "MinTravel": bool(pocket_min_travel),
+            "Fixture": "G59",
         }
         auto_container = _create_auto_container(
             target_obj,

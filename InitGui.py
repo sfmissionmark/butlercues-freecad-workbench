@@ -59,7 +59,8 @@ class MyWorkbench (Workbench):
         self.appendMenu("CNC", "Cues_XUp_Nesting")
         self.appendMenu("CNC", "Cues_Section_CAM_Job")
         self.appendMenu("CNC", "Cues_Pocket_CAM_Job")
-        self.appendToolbar("CNC", ["Cues_XUp_Nesting", "Cues_Section_CAM_Job", "Cues_Pocket_CAM_Job"])
+        self.appendMenu("CNC", "Cues_Export_Group_CAM_Jobs")
+        self.appendToolbar("CNC", ["Cues_XUp_Nesting", "Cues_Section_CAM_Job", "Cues_Pocket_CAM_Job", "Cues_Export_Group_CAM_Jobs"])
 
         return
 
