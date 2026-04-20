@@ -5,6 +5,7 @@ import FreeCAD as App
 import FreeCADGui as Gui
 import Draft
 
+import dimensions
 import materials
 import sketchershapes
 
@@ -31,6 +32,35 @@ def _get_inlay_depth_inches(cue_doc, inlay_type, requested_depth_inches=0.2, cle
         )
 
     return clamped_depth
+
+
+def _get_inlay_outline_size_inches(cue_doc, inlay_type):
+    defaults = dimensions.cue_dimensions().get(inlay_type, {})
+
+    def _quantity_to_inches(value, fallback):
+        try:
+            return float(value.Value) / 25.4
+        except Exception:
+            pass
+        try:
+            return float(App.Units.Quantity(str(value)).Value) / 25.4
+        except Exception:
+            pass
+        return float(fallback)
+
+    default_width = _quantity_to_inches(defaults.get('od', 1.0), 1.0)
+    default_height = _quantity_to_inches(defaults.get('length', 1.0), 1.0)
+
+    var_set = cue_doc.getObject("CueDimensions") if cue_doc else None
+    if not var_set:
+        return default_width, default_height
+
+    try:
+        width_inches = getattr(var_set, f"{inlay_type}_od").Value / 25.4
+        height_inches = getattr(var_set, f"{inlay_type}_length").Value / 25.4
+        return float(width_inches), float(height_inches)
+    except Exception:
+        return default_width, default_height
 
 
 def _get_inlay_source_object(inlay_type):
@@ -83,26 +113,42 @@ def create_inlay_document(inlay_type):
 
     if doc_name not in App.listDocuments().keys():
         depth_inches = _get_inlay_depth_inches(doc, inlay_type)
-        new_document(doc_name, inlay_type, depth_inches)
+        outline_width_inches, outline_height_inches = _get_inlay_outline_size_inches(doc, inlay_type)
+        new_document(doc_name, inlay_type, depth_inches, outline_width_inches, outline_height_inches)
 
     Gui.setActiveDocument(doc)
     create_sketch(inlay_type)
 
 
-def new_document(doc_name, inlay_type, inlay_depth_inches=0.2):
+def new_document(doc_name, inlay_type, inlay_depth_inches=0.2, outline_width_inches=None, outline_height_inches=None):
     doc = App.newDocument(doc_name)
     doc.Label = doc_name
     Gui.SendMsgToActiveView("Save")
 
     body = doc.addObject("PartDesign::Body", f"{inlay_type}_body")
     sketch = body.newObject("Sketcher::SketchObject", f"{inlay_type}_sketch")
+    outline_width_inches = outline_width_inches or 1.0
+    outline_height_inches = outline_height_inches or 1.0
 
     if inlay_type == "handle":
-        sketchershapes.rectangle(sketch, 0.5, 2)
+        sketchershapes.handle(
+            sketch,
+            min(1.0, outline_width_inches * 0.8),
+            0.5,
+            outline_width_inches,
+            outline_height_inches,
+        )
     elif inlay_type == "forearm":
-        sketchershapes.triangle(sketch)
+        sketchershapes.triangle(sketch, 0.5, 9)
+        sketchershapes.add_outline_box(sketch, outline_width_inches, outline_height_inches)
     elif inlay_type == "butt_sleeve":
-        sketchershapes.rectangle(sketch, 0.5, 2)
+        sketchershapes.butt_sleeve(
+            sketch,
+            0.5,
+            2,
+            outline_width_inches,
+            outline_height_inches,
+        )
     else:
         raise ValueError(f"Invalid inlay type: {inlay_type}")
 

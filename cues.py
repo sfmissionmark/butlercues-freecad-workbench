@@ -1,3 +1,4 @@
+
 import FreeCAD
 import FreeCADGui
 import materials
@@ -5,8 +6,14 @@ import components
 import inlays
 import traceback
 import os
+import sys
 import Path
 from Path.Post.Processor import PostProcessorFactory
+# Ensure tiling command is registered
+try:
+    import tiling
+except ImportError:
+    tiling = None
 
 class FC_CueCommand:
     def __init__(self, part_name, menu_text, tooltip, shortcut=None):
@@ -419,6 +426,57 @@ class FC_ExportGroupCAMJobsCommand:
                 post_name = ""
         return post_name, False
 
+    def _ensure_job_machine_for_export(self, job):
+        try:
+            current_machine = str(getattr(job, "Machine", "") or "").strip()
+        except Exception:
+            current_machine = ""
+        if current_machine:
+            return current_machine
+
+        try:
+            from Machine.models.machine import MachineFactory
+        except Exception:
+            return ""
+
+        def _pick_machine_name(names):
+            normalized = [str(name or "").strip() for name in (names or []) if str(name or "").strip()]
+            normalized = [name for name in normalized if name != "<any>"]
+            if not normalized:
+                return ""
+
+            preferred_tokens = ("xyzb", "xyzac", "xyzbc", "xyza", "4axis", "4-axis", "rotary", "b")
+            for token in preferred_tokens:
+                for name in normalized:
+                    low = name.lower().replace(" ", "")
+                    if token in low:
+                        return name
+            return normalized[0]
+
+        machine_name = ""
+        try:
+            machine_name = _pick_machine_name(MachineFactory.list_configurations())
+        except Exception:
+            machine_name = ""
+
+        if not machine_name:
+            try:
+                MachineFactory.create_standard_configs()
+                machine_name = _pick_machine_name(MachineFactory.list_configurations())
+            except Exception:
+                machine_name = ""
+
+        if machine_name:
+            try:
+                job.Machine = machine_name
+                FreeCAD.Console.PrintMessage(
+                    f"[Cues] Auto-set machine '{machine_name}' for export on '{getattr(job, 'Label', getattr(job, 'Name', 'Job'))}'.\n"
+                )
+                return machine_name
+            except Exception:
+                return ""
+        return ""
+
     def _file_extension_for_job(self, job, postprocessor, use_new_flow=False):
         try:
             output_path = str(getattr(job, "PostProcessorOutputFile", "") or "").strip()
@@ -452,17 +510,41 @@ class FC_ExportGroupCAMJobsCommand:
             handle.write(content)
 
     def _post_job_to_folder(self, job, group_label, output_dir, name_counter):
+        self._ensure_job_machine_for_export(job)
         post_name, use_new_flow = self._resolve_post_name_for_job(job)
         if not post_name:
             raise RuntimeError("No post processor configured for job")
 
-        postprocessor = PostProcessorFactory.get_post_processor(job, post_name)
-        if not postprocessor:
-            raise RuntimeError(f"Post processor '{post_name}' unavailable")
+        original_args = ""
+        try:
+            original_args = str(getattr(job, "PostProcessorArgs", "") or "")
+        except Exception:
+            original_args = ""
 
-        post_data = postprocessor.export2() if use_new_flow else postprocessor.export()
-        if not post_data:
-            raise RuntimeError("Post processor returned no output")
+        forced_args = original_args
+        if "--no-show-editor" not in forced_args:
+            forced_args = (forced_args + " --no-show-editor").strip()
+
+        try:
+            try:
+                if hasattr(job, "PostProcessorArgs"):
+                    job.PostProcessorArgs = forced_args
+            except Exception:
+                pass
+
+            postprocessor = PostProcessorFactory.get_post_processor(job, post_name)
+            if not postprocessor:
+                raise RuntimeError(f"Post processor '{post_name}' unavailable")
+
+            post_data = postprocessor.export2() if use_new_flow else postprocessor.export()
+            if not post_data:
+                raise RuntimeError("Post processor returned no output")
+        finally:
+            try:
+                if hasattr(job, "PostProcessorArgs"):
+                    job.PostProcessorArgs = original_args
+            except Exception:
+                pass
 
         ext = self._file_extension_for_job(job, postprocessor, use_new_flow=use_new_flow)
         base_token = self._safe_file_token(group_label)
@@ -589,6 +671,13 @@ class FC_ExportGroupCAMJobsCommand:
             FreeCAD.Console.PrintMessage("[Cues] Wrote:\n")
             for path in written_paths:
                 FreeCAD.Console.PrintMessage(f"  - {path}\n")
+            # Reveal the first exported file in Finder (macOS only)
+            try:
+                if os.name == "posix" and sys.platform == "darwin":
+                    import subprocess
+                    subprocess.Popen(["open", "-R", written_paths[0]])
+            except Exception as exc:
+                FreeCAD.Console.PrintError(f"[Cues] Could not reveal file in Finder: {exc}\n")
 
     def IsActive(self):
         try:

@@ -22,6 +22,11 @@ class MyWorkbench (Workbench):
         #import MyModuleA, MyModuleB # import here all the needed files that create your FreeCAD commands
         import materials
         import cues
+        import inlays
+        try:
+            import tiling
+        except ImportError:
+            tiling = None
         FreeCAD.Console.PrintMessage("[Cues WB v1-2] Initialize with Inlays + CNC\n")
         
         self.list = ["Make_Joint_Cap",
@@ -37,6 +42,9 @@ class MyWorkbench (Workbench):
                      ]
         self.appendToolbar("Cue Commands", self.list) # creates a new toolbar with your commands
         self.appendMenu("Cues", self.list) # creates a new menu
+        # Add Tiling menu
+        self.appendMenu("Tiling", ["Tiling_TileArray", "Tiling_SegmentSections", "Tiling_SplitSegmentMasterSketch", "Tiling_QbertPatternToMaster", "Tiling_QbertPocketSolids"])
+        self.appendMenu("Pattern Lab", ["Tiling_PatternLabTileSketch", "Tiling_PatternLabPatternDownSegment", "Tiling_PatternLabPocketComponent", "Tiling_PatternLabCreateSolids"])
 
         self.appendMenu("Materials", []) # creates a new menu
         for material in materials.materials():
@@ -59,8 +67,9 @@ class MyWorkbench (Workbench):
         self.appendMenu("CNC", "Cues_XUp_Nesting")
         self.appendMenu("CNC", "Cues_Section_CAM_Job")
         self.appendMenu("CNC", "Cues_Pocket_CAM_Job")
+        self.appendMenu("CNC", "Tiling_SegmentPocketCAMJobs")
         self.appendMenu("CNC", "Cues_Export_Group_CAM_Jobs")
-        self.appendToolbar("CNC", ["Cues_XUp_Nesting", "Cues_Section_CAM_Job", "Cues_Pocket_CAM_Job", "Cues_Export_Group_CAM_Jobs"])
+        self.appendToolbar("CNC", ["Cues_XUp_Nesting", "Cues_Section_CAM_Job", "Cues_Pocket_CAM_Job", "Tiling_SegmentPocketCAMJobs", "Cues_Export_Group_CAM_Jobs"])
 
         return
 

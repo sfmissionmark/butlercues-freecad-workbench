@@ -3,6 +3,155 @@ import FreeCADGui as Gui
 import PartDesignGui
 import Part
 import Sketcher
+import math
+
+
+def _require_sketch(sketch):
+    if sketch is None or getattr(sketch, 'TypeId', '') != 'Sketcher::SketchObject':
+        raise ValueError('Input must be a sketch object')
+
+
+def _add_rectangle(sketch, width_mm, height_mm, construction=False):
+    p1 = App.Vector(0, 0)
+    p2 = App.Vector(width_mm, 0)
+    p3 = App.Vector(width_mm, height_mm)
+    p4 = App.Vector(0, height_mm)
+    line0 = sketch.addGeometry(Part.LineSegment(p1, p2), construction)
+    line1 = sketch.addGeometry(Part.LineSegment(p2, p3), construction)
+    line2 = sketch.addGeometry(Part.LineSegment(p3, p4), construction)
+    line3 = sketch.addGeometry(Part.LineSegment(p4, p1), construction)
+    sketch.addConstraint(Sketcher.Constraint('Coincident', line0, 2, line1, 1))
+    sketch.addConstraint(Sketcher.Constraint('Coincident', line1, 2, line2, 1))
+    sketch.addConstraint(Sketcher.Constraint('Coincident', line2, 2, line3, 1))
+    sketch.addConstraint(Sketcher.Constraint('Coincident', line3, 2, line0, 1))
+    sketch.addConstraint(Sketcher.Constraint('Horizontal', line0))
+    sketch.addConstraint(Sketcher.Constraint('Horizontal', line2))
+    sketch.addConstraint(Sketcher.Constraint('Vertical', line1))
+    sketch.addConstraint(Sketcher.Constraint('Vertical', line3))
+    sketch.addConstraint(Sketcher.Constraint('DistanceX', line0, 1, line0, 2, width_mm))
+    sketch.addConstraint(Sketcher.Constraint('DistanceY', line3, 1, line3, 2, height_mm))
+    return (line0, line1, line2, line3)
+
+
+def _add_bottom_centered_rectangle(sketch, width_mm, height_mm, construction=False):
+    half_width = width_mm / 2.0
+    left = App.Vector(-half_width, 0)
+    origin = App.Vector(0, 0)
+    right = App.Vector(half_width, 0)
+    top_right = App.Vector(half_width, height_mm)
+    top_left = App.Vector(-half_width, height_mm)
+
+    line0 = sketch.addGeometry(Part.LineSegment(left, origin), construction)
+    line1 = sketch.addGeometry(Part.LineSegment(origin, right), construction)
+    line2 = sketch.addGeometry(Part.LineSegment(right, top_right), construction)
+    line3 = sketch.addGeometry(Part.LineSegment(top_right, top_left), construction)
+    line4 = sketch.addGeometry(Part.LineSegment(top_left, left), construction)
+
+    sketch.addConstraint(Sketcher.Constraint('Coincident', line0, 2, line1, 1))
+    sketch.addConstraint(Sketcher.Constraint('Coincident', line1, 2, line2, 1))
+    sketch.addConstraint(Sketcher.Constraint('Coincident', line2, 2, line3, 1))
+    sketch.addConstraint(Sketcher.Constraint('Coincident', line3, 2, line4, 1))
+    sketch.addConstraint(Sketcher.Constraint('Coincident', line4, 2, line0, 1))
+    sketch.addConstraint(Sketcher.Constraint('Horizontal', line0))
+    sketch.addConstraint(Sketcher.Constraint('Horizontal', line1))
+    sketch.addConstraint(Sketcher.Constraint('Horizontal', line3))
+    sketch.addConstraint(Sketcher.Constraint('Vertical', line2))
+    sketch.addConstraint(Sketcher.Constraint('Vertical', line4))
+    sketch.addConstraint(Sketcher.Constraint('Equal', line0, line1))
+    sketch.addConstraint(Sketcher.Constraint('PointOnObject', line0, 2, -1))
+    sketch.addConstraint(Sketcher.Constraint('PointOnObject', line0, 2, -2))
+    sketch.addConstraint(Sketcher.Constraint('DistanceX', line0, 1, line1, 2, width_mm))
+    sketch.addConstraint(Sketcher.Constraint('DistanceY', line2, 1, line2, 2, height_mm))
+    return (line0, line1, line2, line3, line4)
+
+
+def add_outline_box(sketch, outer_width_inches, outer_height_inches):
+    _require_sketch(sketch)
+    _add_bottom_centered_rectangle(
+        sketch,
+        outer_width_inches * 25.4,
+        outer_height_inches * 25.4,
+        construction=True,
+    )
+
+
+def _add_horizontal_barbell(sketch, width_mm, height_mm, center_y_mm, construction=False):
+    radius = height_mm / 2.0
+    half_width = width_mm / 2.0
+    straight_half = max(0.0, half_width - radius)
+    left_x = -straight_half
+    right_x = straight_half
+    top_y = center_y_mm + radius
+    bottom_y = center_y_mm - radius
+
+    top_line = sketch.addGeometry(
+        Part.LineSegment(App.Vector(left_x, top_y), App.Vector(right_x, top_y)),
+        construction,
+    )
+    right_arc = sketch.addGeometry(
+        Part.ArcOfCircle(
+            Part.Circle(App.Vector(right_x, center_y_mm), App.Vector(0, 0, 1), radius),
+            math.pi / 2.0,
+            -math.pi / 2.0,
+        ),
+        construction,
+    )
+    bottom_line = sketch.addGeometry(
+        Part.LineSegment(App.Vector(right_x, bottom_y), App.Vector(left_x, bottom_y)),
+        construction,
+    )
+    left_arc = sketch.addGeometry(
+        Part.ArcOfCircle(
+            Part.Circle(App.Vector(left_x, center_y_mm), App.Vector(0, 0, 1), radius),
+            -math.pi / 2.0,
+            math.pi / 2.0,
+        ),
+        construction,
+    )
+
+    sketch.addConstraint(Sketcher.Constraint('Coincident', top_line, 2, right_arc, 1))
+    sketch.addConstraint(Sketcher.Constraint('Coincident', right_arc, 2, bottom_line, 1))
+    sketch.addConstraint(Sketcher.Constraint('Coincident', bottom_line, 2, left_arc, 1))
+    sketch.addConstraint(Sketcher.Constraint('Coincident', left_arc, 2, top_line, 1))
+    sketch.addConstraint(Sketcher.Constraint('Horizontal', top_line))
+    sketch.addConstraint(Sketcher.Constraint('Horizontal', bottom_line))
+    return (top_line, right_arc, bottom_line, left_arc)
+
+
+def _add_centered_diamond(sketch, width_mm, height_mm, center_y_mm, construction=False):
+    half_width = width_mm / 2.0
+    half_height = height_mm / 2.0
+    bottom_y = center_y_mm - half_height
+    top_y = center_y_mm + half_height
+
+    top = App.Vector(0, top_y)
+    right = App.Vector(half_width, center_y_mm)
+    bottom = App.Vector(0, bottom_y)
+    left = App.Vector(-half_width, center_y_mm)
+
+    anchor = sketch.addGeometry(Part.LineSegment(App.Vector(0, 0), App.Vector(0, bottom_y)), True)
+    line0 = sketch.addGeometry(Part.LineSegment(top, right), construction)
+    line1 = sketch.addGeometry(Part.LineSegment(right, bottom), construction)
+    line2 = sketch.addGeometry(Part.LineSegment(bottom, left), construction)
+    line3 = sketch.addGeometry(Part.LineSegment(left, top), construction)
+
+    sketch.addConstraint(Sketcher.Constraint('Vertical', anchor))
+    sketch.addConstraint(Sketcher.Constraint('PointOnObject', anchor, 1, -1))
+    sketch.addConstraint(Sketcher.Constraint('PointOnObject', anchor, 1, -2))
+    sketch.addConstraint(Sketcher.Constraint('DistanceY', anchor, 1, anchor, 2, bottom_y))
+
+    sketch.addConstraint(Sketcher.Constraint('Coincident', anchor, 2, line1, 2))
+    sketch.addConstraint(Sketcher.Constraint('Coincident', line0, 2, line1, 1))
+    sketch.addConstraint(Sketcher.Constraint('Coincident', line1, 2, line2, 1))
+    sketch.addConstraint(Sketcher.Constraint('Coincident', line2, 2, line3, 1))
+    sketch.addConstraint(Sketcher.Constraint('Coincident', line3, 2, line0, 1))
+    sketch.addConstraint(Sketcher.Constraint('PointOnObject', line0, 1, -2))
+    sketch.addConstraint(Sketcher.Constraint('Equal', line0, line1))
+    sketch.addConstraint(Sketcher.Constraint('Equal', line1, line2))
+    sketch.addConstraint(Sketcher.Constraint('Equal', line2, line3))
+    sketch.addConstraint(Sketcher.Constraint('DistanceX', line3, 1, line0, 2, width_mm))
+    sketch.addConstraint(Sketcher.Constraint('DistanceY', line1, 2, line0, 1, height_mm))
+    return (line0, line1, line2, line3)
 
 
 def pad_sketch(sketch, length_inches):
@@ -19,38 +168,38 @@ def pad_sketch(sketch, length_inches):
 
 
 def rectangle(sketch = None, width_inches = 0.5, height_inches = 2, distance_y = 0.5):
-    if sketch.TypeId != 'Sketcher::SketchObject':
-        raise ValueError('Input must be a sketch object')
+    _require_sketch(sketch)
 
-    # Convert inches to mm (FreeCAD uses mm internally)
     width = width_inches * 25.4
     height = height_inches * 25.4
-    y_distance = distance_y * 25.4
 
-    # Add a rectangle to the sketch by drawing four lines
-    p1 = App.Vector(0, 0)
-    p2 = App.Vector(width, 0)
-    p3 = App.Vector(width, height)
-    p4 = App.Vector(0, height)
-    sketch.addGeometry(Part.LineSegment(p1, p2), False)
-    sketch.addGeometry(Part.LineSegment(p2, p3), False)
-    sketch.addGeometry(Part.LineSegment(p3, p4), False)
-    sketch.addGeometry(Part.LineSegment(p4, p1), False)
+    _add_rectangle(sketch, width, height, construction=False)
+    print(f"Part created successfully ({width_inches}\" x {height_inches}\")")
 
-    # Fully constrain the rectangle
-    sketch.addConstraint(Sketcher.Constraint('Coincident', 0, 2, 1, 1))  # Top-right to bottom-right
-    sketch.addConstraint(Sketcher.Constraint('Coincident', 1, 2, 2, 1))  # Bottom-right to bottom-left
-    sketch.addConstraint(Sketcher.Constraint('Coincident', 2, 2, 3, 1))  # Bottom-left to top-left
-    sketch.addConstraint(Sketcher.Constraint('Coincident', 3, 2, 0, 1))  # Top-left to top-right
-    # sketch.addConstraint(Sketcher.Constraint('Horizontal', 0))  # Bottom edge horizontal
-    sketch.addConstraint(Sketcher.Constraint('Horizontal', 2))  # Top edge horizontal
-    sketch.addConstraint(Sketcher.Constraint('Vertical', 1))  # Right edge vertical
-    sketch.addConstraint(Sketcher.Constraint('Vertical', 3))  # Left edge vertical
-    sketch.addConstraint(Sketcher.Constraint('DistanceX', 0, 1, 0, 2, width))  # Width of rectangle
-    sketch.addConstraint(Sketcher.Constraint('DistanceY', 0, 1, 3, 1, height))  # Height of rectangle
-    sketch.addConstraint(Sketcher.Constraint('DistanceY',-1,1,0,2,distance_y))
-    sketch.addConstraint(Sketcher.Constraint('Symmetric',0,1,0,2,-2))
 
+def handle(sketch=None, width_inches=1.0, height_inches=0.5, outer_width_inches=1.25, outer_height_inches=12.25):
+    _require_sketch(sketch)
+    add_outline_box(sketch, outer_width_inches, outer_height_inches)
+    _add_horizontal_barbell(
+        sketch,
+        width_inches * 25.4,
+        height_inches * 25.4,
+        (outer_height_inches * 25.4) / 2.0,
+        construction=False,
+    )
+    print(f"Part created successfully ({width_inches}\" x {height_inches}\")")
+
+
+def butt_sleeve(sketch=None, width_inches=0.5, height_inches=2, outer_width_inches=1.3, outer_height_inches=3.25):
+    _require_sketch(sketch)
+    add_outline_box(sketch, outer_width_inches, outer_height_inches)
+    _add_centered_diamond(
+        sketch,
+        width_inches * 25.4,
+        height_inches * 25.4,
+        (outer_height_inches * 25.4) / 2.0,
+        construction=False,
+    )
     print(f"Part created successfully ({width_inches}\" x {height_inches}\")")
 
 
@@ -58,8 +207,7 @@ def rectangle(sketch = None, width_inches = 0.5, height_inches = 2, distance_y =
 
 
 def diamond(sketch = None, width_inches = 0.5, height_inches = 2):
-    if sketch.TypeId != 'Sketcher::SketchObject':
-        raise ValueError('Input must be a sketch object')
+    _require_sketch(sketch)
 
     # Convert inches to mm (FreeCAD uses mm internally)
     width = width_inches * 25.4 / 2
@@ -102,8 +250,7 @@ def diamond(sketch = None, width_inches = 0.5, height_inches = 2):
 
 
 def triangle(sketch = None, width_inches = 0.5, height_inches = 4):
-    if sketch.TypeId != 'Sketcher::SketchObject':
-        raise ValueError('Input must be a sketch object')
+    _require_sketch(sketch)
 
     # Convert inches to mm (FreeCAD uses mm internally)
     width = width_inches * 25.4/2

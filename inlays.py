@@ -11,6 +11,7 @@ import math
 import json
 import time
 import os
+import glob
 
 # Tuple of 3 bright colors as RGBA floats for `ViewObject.NormalColor`
 _TOOLPATH_COLORS = (
@@ -19,11 +20,269 @@ _TOOLPATH_COLORS = (
     (1.0, 0.87, 0.0, 1.0),  # Golden Yellow
 )
 
+_BUTLER_DISABLE_CAM_UNDO = True
+
 try:
     from PySide import QtGui, QtCore
 except Exception:
     QtGui = None
     QtCore = None
+
+
+def _collect_job_template_files(search_paths_provider):
+    files = []
+    try:
+        for path in search_paths_provider():
+            files.extend(glob.glob(os.path.join(path, "job_*.json")))
+    except Exception:
+        return []
+
+    seen = set()
+    out = []
+    for file_path in files:
+        norm = os.path.normpath(file_path)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        out.append(norm)
+    return out
+
+
+def _job_template_display_name(path):
+    base = os.path.splitext(os.path.basename(path))[0]
+    if base.lower().startswith("job_"):
+        return base[4:]
+    return base
+
+
+def _job_template_tool_controller_options(template_path, include_tool_number=True):
+    def _to_mm(value):
+        try:
+            return float(getattr(value, "Value", value))
+        except Exception:
+            pass
+        try:
+            return float(App.Units.Quantity(str(value)).Value)
+        except Exception:
+            pass
+        try:
+            return float(value)
+        except Exception:
+            return 0.0
+
+    def _to_float(value, default=0.0):
+        try:
+            return float(getattr(value, "Value", value))
+        except Exception:
+            pass
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
+
+    def _feed_to_ipm(value, default=0.0, assume_number_is_mm_per_sec=False):
+        try:
+            raw = str(value or "").strip().lower()
+        except Exception:
+            raw = ""
+        if not raw:
+            return max(0.0, float(default))
+
+        try:
+            mm_per_sec = re.match(r"^\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*mm\s*/\s*s\s*$", raw)
+            if mm_per_sec:
+                return max(0.0, float(mm_per_sec.group(1)) * 60.0 / 25.4)
+        except Exception:
+            pass
+
+        try:
+            mm_per_min = re.match(r"^\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*mm\s*/\s*min\s*$", raw)
+            if mm_per_min:
+                return max(0.0, float(mm_per_min.group(1)) / 25.4)
+        except Exception:
+            pass
+
+        try:
+            in_per_sec = re.match(r"^\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*in\s*/\s*s\s*$", raw)
+            if in_per_sec:
+                return max(0.0, float(in_per_sec.group(1)) * 60.0)
+        except Exception:
+            pass
+
+        try:
+            in_per_min = re.match(r"^\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*(?:in\s*/\s*min|ipm)\s*$", raw)
+            if in_per_min:
+                return max(0.0, float(in_per_min.group(1)))
+        except Exception:
+            pass
+
+        try:
+            parsed = _to_float(value, default)
+        except Exception:
+            parsed = float(default)
+
+        if bool(assume_number_is_mm_per_sec):
+            return max(0.0, float(parsed) * 60.0 / 25.4)
+        return max(0.0, float(parsed) / 25.4)
+
+    path = str(template_path or "").strip()
+    if not path or not os.path.exists(path):
+        return []
+
+    try:
+        with open(path, "rb") as fp:
+            attrs = json.load(fp)
+    except Exception:
+        return []
+
+    raw_tcs = attrs.get("ToolController") or []
+    if not isinstance(raw_tcs, list):
+        return []
+
+    options = []
+    for idx, tc in enumerate(raw_tcs, start=1):
+        if not isinstance(tc, dict):
+            continue
+        name = str(tc.get("name", "") or "").strip() or f"TC{idx}"
+        label = str(tc.get("label", "") or "").strip() or name
+
+        tool_number = None
+        if include_tool_number:
+            try:
+                tool_number = int(tc.get("nr")) if tc.get("nr") is not None else None
+            except Exception:
+                tool_number = None
+
+        tool_data = tc.get("tool", {}) if isinstance(tc.get("tool", {}), dict) else {}
+        tool_params = tool_data.get("parameter", {}) if isinstance(tool_data.get("parameter", {}), dict) else {}
+        tool_label = str(
+            tool_data.get("name", "")
+            or tool_data.get("label", "")
+            or tc.get("toolname", "")
+            or tc.get("tool", "")
+            or ""
+        ).strip()
+        diameter_mm = _to_mm(
+            tool_data.get(
+                "diameter",
+                tool_data.get(
+                    "Diameter",
+                    tool_params.get(
+                        "diameter",
+                        tool_params.get("Diameter", tc.get("diameter", tc.get("Diameter", 0.0))),
+                    ),
+                ),
+            )
+        )
+        default_stepdown_in = (float(diameter_mm) / 25.4) if float(diameter_mm) > 0.0 else 0.0
+        raw_horiz_feed = tc.get(
+            "hfeed",
+            tc.get(
+                "HFeed",
+                tc.get("horizFeed", tc.get("HorizFeed", tc.get("horizontalFeed", tc.get("HorizontalFeed", 0.0)))),
+            ),
+        )
+        default_speed_ipm = _feed_to_ipm(raw_horiz_feed, 0.0, assume_number_is_mm_per_sec=True)
+
+        display = label
+        if diameter_mm > 0.0:
+            display = f"{display} ({diameter_mm / 25.4:.3f} in)"
+        elif tool_label:
+            display = f"{display} ({tool_label})"
+
+        entry = {
+            "name": name,
+            "label": label,
+            "tool_label": tool_label,
+            "diameter_mm": diameter_mm,
+            "default_stepdown_in": default_stepdown_in,
+            "default_speed_ipm": default_speed_ipm,
+            "display": display,
+        }
+        if include_tool_number:
+            entry["tool_number"] = tool_number
+
+        options.append(entry)
+
+    options.sort(
+        key=lambda item: (
+            (float(item.get("diameter_mm", 0.0) or 0.0) <= 0.0),
+            float(item.get("diameter_mm", 0.0) or 0.0),
+            str(item.get("display", "")).lower(),
+        )
+    )
+    return options
+
+
+def _as_mm_value(value):
+    try:
+        return float(getattr(value, "Value", value))
+    except Exception:
+        return 0.0
+
+
+def _tool_diameter_mm_from_tc(tc_obj):
+    try:
+        tool = getattr(tc_obj, "Tool", None)
+        d = getattr(tool, "Diameter", None)
+        return _as_mm_value(d)
+    except Exception:
+        return 0.0
+
+
+def _sorted_job_tool_controllers_largest_first(job_obj):
+    try:
+        tools_group = list(getattr(getattr(job_obj, "Tools", None), "Group", None) or [])
+    except Exception:
+        tools_group = []
+
+    with_diameter = []
+    without_diameter = []
+    for tc in tools_group:
+        dmm = _tool_diameter_mm_from_tc(tc)
+        if dmm > 0:
+            with_diameter.append((dmm, tc))
+        else:
+            without_diameter.append(tc)
+
+    with_diameter.sort(key=lambda item: item[0], reverse=True)
+    ordered = [tc for _, tc in with_diameter]
+    ordered.extend(without_diameter)
+    return ordered
+
+
+def _selected_tool_labels_for_job_names(job_obj, selected_names):
+    selected_set = {str(name) for name in (selected_names or []) if str(name).strip()}
+    labels = []
+    try:
+        for tc in _sorted_job_tool_controllers_largest_first(job_obj):
+            tc_name = str(getattr(tc, "Name", "") or "")
+            if tc_name and tc_name in selected_set:
+                tc_label = str(getattr(tc, "Label", "") or "").strip()
+                labels.append(tc_label or tc_name)
+    except Exception:
+        pass
+    return labels
+
+
+def _create_path_op_with_selected_tc(path_utils_module, create_callable, name, parent_job, selected_tc):
+    original_ui = getattr(path_utils_module, "UserInput", None)
+
+    class _ToolSelectionShim:
+        def selectedToolController(self):
+            return selected_tc
+
+        def chooseToolController(self, controllers):
+            if selected_tc in controllers:
+                return selected_tc
+            return controllers[0] if controllers else None
+
+    try:
+        if selected_tc is not None:
+            path_utils_module.UserInput = _ToolSelectionShim()
+        return create_callable(name, obj=None, parentJob=parent_job)
+    finally:
+        path_utils_module.UserInput = original_ui
 
 def _select_bit_for_profile(profile_data, bit_candidates, min_runtime_threshold=10.0, min_travel_threshold=5.0):
     # Select bit based on runtime/travel thresholds
@@ -122,6 +381,7 @@ def create_sketch(inlay_type="handle", inlay_name=None):
 
 
 def fillet_for_cnc(
+    target=None,
     noise=None,
     fillet_radius_inch=None,
     final_solid_name=None,
@@ -131,6 +391,7 @@ def fillet_for_cnc(
     show_dialog=True,
 ):
     return _inlays_fillet.fillet_for_cnc(
+        target=target,
         noise=noise,
         fillet_radius_inch=fillet_radius_inch,
         final_solid_name=final_solid_name,
@@ -167,6 +428,7 @@ def create_section_cnc_job(
     profile_keep_tool_down_override=None,
     profile_min_travel_override=None,
     profile_flip_x_axis_override=None,
+    profile_move_to_xy_zero_override=None,
     profile_glue_clearance_override=None,
     split_solids_to_docs_override=None,
     parent_group_override=None,
@@ -176,7 +438,23 @@ def create_section_cnc_job(
         print("No active document.")
         return
 
-    _ensure_butler_container_cleanup_observer()
+    if _BUTLER_DISABLE_CAM_UNDO:
+        try:
+            _disable_butler_container_cleanup_observer()
+            doc_name = str(getattr(doc, "Name", "") or "").strip()
+            if doc_name:
+                _butler_undo_cleanup_bundles.pop(doc_name, None)
+        except Exception:
+            pass
+    else:
+        _ensure_butler_container_cleanup_observer()
+
+    try:
+        doc_name = str(getattr(doc, "Name", "") or "").strip()
+        if doc_name:
+            _butler_undo_cleanup_bundles.pop(doc_name, None)
+    except Exception:
+        pass
 
     pre_object_names = set()
     try:
@@ -185,23 +463,7 @@ def create_section_cnc_job(
         pre_object_names = set()
 
     def _record_undo_cleanup_bundle():
-        try:
-            if not _butler_enable_undo_cleanup_observer:
-                return
-            current_names = [
-                str(getattr(obj, "Name", "") or "")
-                for obj in (getattr(doc, "Objects", []) or [])
-                if str(getattr(obj, "Name", "") or "") not in pre_object_names
-            ]
-            current_names = [name for name in current_names if name]
-            if not current_names:
-                return
-            doc_name = str(getattr(doc, "Name", "") or "").strip()
-            if not doc_name:
-                return
-            _butler_undo_cleanup_bundles.setdefault(doc_name, []).append(current_names)
-        except Exception:
-            pass
+        return
 
     try:
         import Path.Main.Job as PathJob
@@ -304,39 +566,6 @@ def create_section_cnc_job(
         except Exception:
             pass
 
-    def _set_job_fixtures(job_obj, fixtures):
-        if not job_obj:
-            return
-        try:
-            if hasattr(job_obj, "Fixtures"):
-                job_obj.Fixtures = list(fixtures or [])
-        except Exception:
-            pass
-
-    def _move_job_to_document_root(job_obj):
-        if not job_obj:
-            return
-        for parent in list(getattr(job_obj, "InList", []) or []):
-            if parent == job_obj:
-                continue
-            try:
-                if hasattr(parent, "removeObject"):
-                    parent.removeObject(job_obj)
-            except Exception:
-                pass
-
-    def _move_job_to_document_root(job_obj):
-        if not job_obj:
-            return
-        for parent in list(getattr(job_obj, "InList", []) or []):
-            if parent == job_obj:
-                continue
-            try:
-                if hasattr(parent, "removeObject"):
-                    parent.removeObject(job_obj)
-            except Exception:
-                pass
-
     def _move_job_to_document_root(job_obj):
         if not job_obj:
             return
@@ -363,6 +592,17 @@ def create_section_cnc_job(
         candidate = _unwrap_candidate(obj)
         if not candidate:
             return False
+        try:
+            if bool(getattr(candidate, "ButlerIsPocketModel", False)):
+                return True
+        except Exception:
+            pass
+        try:
+            workflow_tag = str(getattr(candidate, "ButlerCuesWorkflow", "") or "").strip().lower()
+            if workflow_tag == "pocket model":
+                return True
+        except Exception:
+            pass
         for prop_name in (
             "FilletRadiusInch",
             "FilletSettingsSummary",
@@ -497,6 +737,7 @@ def create_section_cnc_job(
         keep_tool_down,
         min_travel,
         flip_x_axis,
+        move_to_xy_zero,
         glue_clearance_in,
     ):
         if not source_obj:
@@ -680,6 +921,7 @@ def create_section_cnc_job(
                     show_dialog=False,
                     selected_tool_names_override=selected_tool_names,
                     profile_flip_x_axis_override=flip_x_axis,
+                    profile_move_to_xy_zero_override=move_to_xy_zero,
                     profile_keep_tool_down_override=keep_tool_down,
                     profile_min_travel_override=min_travel,
                     profile_glue_clearance_override=glue_clearance_in,
@@ -726,109 +968,9 @@ def create_section_cnc_job(
     if not _warn_non_fillet_source(target_obj, "Inlay Job"):
         return
 
-    def _template_files():
-        files = []
-        try:
-            for path in PathPreferences.searchPaths():
-                files.extend(glob.glob(os.path.join(path, "job_*.json")))
-        except Exception:
-            return []
-
-        # Normalize and dedupe while preserving order
-        seen = set()
-        out = []
-        for f in files:
-            norm = os.path.normpath(f)
-            if norm in seen:
-                continue
-            seen.add(norm)
-            out.append(norm)
-        return out
-
-    templates = _template_files()
-
-    def _template_display_name(path):
-        base = os.path.splitext(os.path.basename(path))[0]
-        if base.lower().startswith("job_"):
-            return base[4:]
-        return base
-
-    def _template_tool_controller_options(template_path):
-        def _to_mm(value):
-            try:
-                return float(getattr(value, "Value", value))
-            except Exception:
-                pass
-            try:
-                return float(App.Units.Quantity(str(value)).Value)
-            except Exception:
-                pass
-            try:
-                return float(value)
-            except Exception:
-                return 0.0
-
-        path = str(template_path or "").strip()
-        if not path or not os.path.exists(path):
-            return []
-
-        try:
-            with open(path, "rb") as fp:
-                attrs = json.load(fp)
-        except Exception:
-            return []
-
-        raw_tcs = attrs.get("ToolController") or []
-        if not isinstance(raw_tcs, list):
-            return []
-
-        options = []
-        for idx, tc in enumerate(raw_tcs, start=1):
-            if not isinstance(tc, dict):
-                continue
-            name = str(tc.get("name", "") or "").strip() or f"TC{idx}"
-            label = str(tc.get("label", "") or "").strip() or name
-            try:
-                tool_number = int(tc.get("nr")) if tc.get("nr") is not None else None
-            except Exception:
-                tool_number = None
-
-            tool_data = tc.get("tool", {}) if isinstance(tc.get("tool", {}), dict) else {}
-            tool_label = str(
-                tool_data.get("name", "")
-                or tool_data.get("label", "")
-                or tc.get("toolname", "")
-                or tc.get("tool", "")
-                or ""
-            ).strip()
-            diameter_mm = _to_mm(
-                tool_data.get("diameter", tool_data.get("Diameter", tc.get("diameter", tc.get("Diameter", 0.0))))
-            )
-
-            display = label
-            if diameter_mm > 0.0:
-                display = f"{display} ({diameter_mm / 25.4:.3f} in)"
-            elif tool_label:
-                display = f"{display} ({tool_label})"
-
-            options.append(
-                {
-                    "name": name,
-                    "label": label,
-                    "tool_label": tool_label,
-                    "diameter_mm": diameter_mm,
-                    "tool_number": tool_number,
-                    "display": display,
-                }
-            )
-
-        options.sort(
-            key=lambda item: (
-                -(float(item.get("diameter_mm", 0.0) or 0.0)),
-                str(item.get("display", "")).lower(),
-            )
-        )
-        return options
+    templates = _collect_job_template_files(PathPreferences.searchPaths)
+    _template_display_name = _job_template_display_name
+    _template_tool_controller_options = _job_template_tool_controller_options
 
     def _create_auto_container(original_obj, created_items, final_depth_in=None, settings=None, parent_group=None):
         def _ensure_parent_group(preferred_label):
@@ -983,90 +1125,42 @@ def create_section_cnc_job(
         except Exception:
             pass
 
-    def _expand_targets_in_tree(target_objects):
-        if not target_objects or not Gui or QtGui is None:
-            return
-        try:
-            from PySide import QtCore
-
-            target_tokens = set()
-            for obj in list(target_objects or []):
-                if not obj:
-                    continue
-                try:
-                    name = str(getattr(obj, "Name", "") or "").strip()
-                    if name:
-                        target_tokens.add(name)
-                except Exception:
-                    pass
-                try:
-                    label = str(getattr(obj, "Label", "") or "").strip()
-                    if label:
-                        target_tokens.add(label)
-                except Exception:
-                    pass
-
-            if not target_tokens:
-                return
-
-            main_window = Gui.getMainWindow()
-            if not main_window:
-                return
-
-            for tree_view in main_window.findChildren(QtGui.QTreeView):
-                model = tree_view.model()
-                if not model:
-                    continue
-
-                def _expand_recursive(parent_index):
-                    rows = model.rowCount(parent_index)
-                    for row in range(rows):
-                        idx = model.index(row, 0, parent_index)
-                        text = str(model.data(idx) or "")
-                        if text in target_tokens:
-                            tree_view.setExpanded(idx, True)
-                        _expand_recursive(idx)
-
-                _expand_recursive(QtCore.QModelIndex())
-        except Exception:
-            pass
-
     effective_template_path = scripted_template_path
     inlay_prefs = None
     inlay_count = 1
-    nest_rotate_180 = True
     inlay_final_depth_in = 0.200
     nest_gap_in = 0.080
     profile_glue_clearance_in = 0.0
     profile_keep_tool_down = True
     profile_min_travel = True
     profile_flip_x_axis = False
+    profile_move_to_xy_zero = False
     split_solids_to_docs = False
     try:
         inlay_prefs = App.ParamGet("User parameter:BaseApp/Preferences/Mod/ButlerCues/InlayJob")
         inlay_count = max(1, int(inlay_prefs.GetInt("inlay_count", 1)))
-        nest_rotate_180 = bool(
-            inlay_prefs.GetBool(
-                "nest_rotate_180",
-                inlay_prefs.GetBool("auto_rotate_xup", True),
-            )
-        )
         inlay_final_depth_in = max(0.0, float(inlay_prefs.GetFloat("final_depth_in", 0.200)))
         nest_gap_in = max(0.0, float(inlay_prefs.GetFloat("nest_gap_in", 0.080)))
         profile_keep_tool_down = bool(inlay_prefs.GetBool("profile_keep_tool_down", True))
         profile_min_travel = bool(inlay_prefs.GetBool("profile_min_travel", True))
-        profile_flip_x_axis = bool(inlay_prefs.GetBool("profile_flip_x_axis", False))
+        profile_flip_x_axis = bool(
+            inlay_prefs.GetBool(
+                "profile_flip_y_axis",
+                inlay_prefs.GetBool("profile_flip_x_axis", False),
+            )
+        )
+        profile_move_to_xy_zero = bool(inlay_prefs.GetBool("profile_move_to_xy_zero", False))
         split_solids_to_docs = bool(inlay_prefs.GetBool("split_solids_to_docs", False))
     except Exception:
         inlay_prefs = None
         inlay_count = 1
-        nest_rotate_180 = True
         inlay_final_depth_in = 0.200
         nest_gap_in = 0.080
         profile_glue_clearance_in = 0.0
         profile_keep_tool_down = True
         profile_min_travel = True
         profile_flip_x_axis = False
+        profile_move_to_xy_zero = False
         split_solids_to_docs = False
 
     if profile_keep_tool_down_override is not None:
@@ -1084,6 +1178,11 @@ def create_section_cnc_job(
             profile_flip_x_axis = bool(profile_flip_x_axis_override)
         except Exception:
             profile_flip_x_axis = False
+    if profile_move_to_xy_zero_override is not None:
+        try:
+            profile_move_to_xy_zero = bool(profile_move_to_xy_zero_override)
+        except Exception:
+            profile_move_to_xy_zero = False
     if profile_glue_clearance_override is not None:
         try:
             profile_glue_clearance_in = float(profile_glue_clearance_override)
@@ -1190,14 +1289,14 @@ def create_section_cnc_job(
                 self.glue_clearance_spin.setSingleStep(0.0005)
                 self.glue_clearance_spin.setValue(float(profile_glue_clearance_in))
 
-                self.rotate_xup_check = QtGui.QCheckBox("Alternate 180° rotation for nesting")
-                self.rotate_xup_check.setChecked(bool(nest_rotate_180))
                 self.keep_tool_down_check = QtGui.QCheckBox("Keep tool down")
                 self.keep_tool_down_check.setChecked(bool(profile_keep_tool_down))
                 self.min_travel_check = QtGui.QCheckBox("Min travel")
                 self.min_travel_check.setChecked(bool(profile_min_travel))
-                self.flip_x_axis_check = QtGui.QCheckBox("Flip Z axis")
+                self.flip_x_axis_check = QtGui.QCheckBox("Flip Y axis")
                 self.flip_x_axis_check.setChecked(bool(profile_flip_x_axis))
+                self.move_xy_zero_check = QtGui.QCheckBox("Move to X0 Y0 (left/front edge)")
+                self.move_xy_zero_check.setChecked(bool(profile_move_to_xy_zero))
                 self.split_solids_check = QtGui.QCheckBox("Create separate CAM job/group for each solid")
                 self.split_solids_check.setChecked(bool(split_solids_to_docs))
 
@@ -1229,6 +1328,19 @@ def create_section_cnc_job(
                 except Exception:
                     self._selected_bits_by_template = {}
 
+                self._bit_settings_by_template = {}
+                try:
+                    if inlay_prefs is not None:
+                        raw_settings_map = str(
+                            inlay_prefs.GetString("selected_bit_settings_by_template_inlay", "") or ""
+                        ).strip()
+                        if raw_settings_map:
+                            loaded_settings_map = json.loads(raw_settings_map)
+                            if isinstance(loaded_settings_map, dict):
+                                self._bit_settings_by_template = loaded_settings_map
+                except Exception:
+                    self._bit_settings_by_template = {}
+
                 def _template_key(path_text):
                     try:
                         text = str(path_text or "").strip()
@@ -1249,6 +1361,58 @@ def create_section_cnc_job(
                             pass
                     return list(self._fallback_bit_selections)
 
+                def _ensure_settings_for_template(path_text, tool_options):
+                    key = _template_key(path_text)
+                    if key not in self._bit_settings_by_template or not isinstance(self._bit_settings_by_template.get(key), dict):
+                        self._bit_settings_by_template[key] = {}
+                    settings = self._bit_settings_by_template.get(key, {})
+
+                    changed = False
+                    for option in list(tool_options or []):
+                        name = str(option.get("name", "") or "").strip()
+                        if not name:
+                            continue
+                        if name not in settings or not isinstance(settings.get(name), dict):
+                            settings[name] = {}
+                        row = settings.get(name, {})
+
+                        try:
+                            if float(row.get("stepdown_in", 0.0) or 0.0) <= 0.0:
+                                row["stepdown_in"] = max(0.0, float(option.get("default_stepdown_in", 0.0) or 0.0))
+                                changed = True
+                        except Exception:
+                            row["stepdown_in"] = max(0.0, float(option.get("default_stepdown_in", 0.0) or 0.0))
+                            changed = True
+
+                        try:
+                            speed_existing = float(row.get("speed_ipm", 0.0) or 0.0)
+                        except Exception:
+                            speed_existing = 0.0
+                        if speed_existing <= 0.0:
+                            try:
+                                speed_default = max(0.0, float(option.get("default_speed_ipm", 0.0) or 0.0))
+                            except Exception:
+                                speed_default = 0.0
+                            if speed_default > 0.0:
+                                row["speed_ipm"] = speed_default
+                                changed = True
+
+                        settings[name] = row
+
+                    self._bit_settings_by_template[key] = settings
+
+                    if changed:
+                        try:
+                            if inlay_prefs is not None:
+                                inlay_prefs.SetString(
+                                    "selected_bit_settings_by_template_inlay",
+                                    json.dumps(self._bit_settings_by_template),
+                                )
+                        except Exception:
+                            pass
+
+                    return key, settings
+
                 def _clear_bits_ui():
                     try:
                         while self._bit_layout.count() > 0:
@@ -1264,9 +1428,12 @@ def create_section_cnc_job(
                     _clear_bits_ui()
                     template_path = str(self.template_edit.text() or "").strip()
                     tool_options = _template_tool_controller_options(template_path)
+                    self._current_tool_options = list(tool_options or [])
                     if not tool_options:
                         self._bit_layout.addWidget(QtGui.QLabel("No bits found in selected CAM template."))
                         return
+
+                    _ensure_settings_for_template(template_path, tool_options)
 
                     self._persisted_bit_selections = _persisted_for_template(template_path)
 
@@ -1287,17 +1454,57 @@ def create_section_cnc_job(
                                     return True
                         return False
 
+                    key, settings_for_template = _ensure_settings_for_template(template_path, tool_options)
+
                     for option in tool_options:
                         tc_name = str(option.get("name", "") or "")
                         tc_label = str(option.get("label", "") or "")
                         cb = QtGui.QCheckBox(str(option.get("display", tc_label or tc_name) or tc_name))
                         cb.setChecked(bool(_is_persisted(option)))
+
+                        bit_name = str(option.get("name", "") or "").strip()
+                        bit_settings = dict(settings_for_template.get(bit_name, {}) or {})
+
+                        step_spin = QtGui.QDoubleSpinBox()
+                        step_spin.setDecimals(4)
+                        step_spin.setRange(0.0, 1.0)
+                        step_spin.setSingleStep(0.005)
+                        step_spin.setToolTip("Step Down (in), 0 = use template default for this bit")
+                        try:
+                            step_spin.setValue(max(0.0, float(bit_settings.get("stepdown_in", option.get("default_stepdown_in", 0.0)) or 0.0)))
+                        except Exception:
+                            step_spin.setValue(max(0.0, float(option.get("default_stepdown_in", 0.0) or 0.0)))
+
+                        speed_spin = QtGui.QDoubleSpinBox()
+                        speed_spin.setDecimals(2)
+                        speed_spin.setRange(0.0, 1000.0)
+                        speed_spin.setSingleStep(1.0)
+                        speed_spin.setToolTip("Speed (ipm), 0 = use template default for this bit")
+                        try:
+                            speed_spin.setValue(max(0.0, float(bit_settings.get("speed_ipm", option.get("default_speed_ipm", 0.0)) or 0.0)))
+                        except Exception:
+                            speed_spin.setValue(max(0.0, float(option.get("default_speed_ipm", 0.0) or 0.0)))
+
+                        row_widget = QtGui.QWidget()
+                        row_layout = QtGui.QHBoxLayout(row_widget)
+                        row_layout.setContentsMargins(0, 0, 0, 0)
+                        row_layout.addWidget(cb, 1)
+                        row_layout.addWidget(QtGui.QLabel("Step:"))
+                        row_layout.addWidget(step_spin)
+                        row_layout.addWidget(QtGui.QLabel("IPM:"))
+                        row_layout.addWidget(speed_spin)
+
                         try:
                             cb.toggled.connect(self._mark_dirty)
                         except Exception:
                             pass
-                        self._bit_layout.addWidget(cb)
-                        self.tool_checkboxes.append((option, cb))
+                        try:
+                            step_spin.valueChanged.connect(self._mark_dirty)
+                            speed_spin.valueChanged.connect(self._mark_dirty)
+                        except Exception:
+                            pass
+                        self._bit_layout.addWidget(row_widget)
+                        self.tool_checkboxes.append((option, cb, step_spin, speed_spin))
 
                 self._refresh_bits_from_template = _refresh_bits_from_template
 
@@ -1308,8 +1515,8 @@ def create_section_cnc_job(
                 layout.addRow("Final depth (in)", self.final_depth_spin)
                 layout.addRow("Nesting gap (in)", self.nest_gap_spin)
                 layout.addRow("Glue clearance (in)", self.glue_clearance_spin)
-                layout.addRow("Packing", self.rotate_xup_check)
                 layout.addRow("Orientation", self.flip_x_axis_check)
+                layout.addRow("Placement", self.move_xy_zero_check)
                 layout.addRow("Split solids", self.split_solids_check)
                 layout.addRow("Keep Tool Down", self.keep_tool_down_check)
                 layout.addRow("Min Travel", self.min_travel_check)
@@ -1325,8 +1532,8 @@ def create_section_cnc_job(
                     self.final_depth_spin.valueChanged.connect(self._mark_dirty)
                     self.nest_gap_spin.valueChanged.connect(self._mark_dirty)
                     self.glue_clearance_spin.valueChanged.connect(self._mark_dirty)
-                    self.rotate_xup_check.toggled.connect(self._mark_dirty)
                     self.flip_x_axis_check.toggled.connect(self._mark_dirty)
+                    self.move_xy_zero_check.toggled.connect(self._mark_dirty)
                     self.split_solids_check.toggled.connect(self._mark_dirty)
                     self.keep_tool_down_check.toggled.connect(self._mark_dirty)
                     self.min_travel_check.toggled.connect(self._mark_dirty)
@@ -1368,10 +1575,6 @@ def create_section_cnc_job(
                 except Exception:
                     glue_clearance = 0.0
                 try:
-                    rotate_180 = bool(self.rotate_xup_check.isChecked())
-                except Exception:
-                    rotate_180 = True
-                try:
                     keep_tool_down = bool(self.keep_tool_down_check.isChecked())
                 except Exception:
                     keep_tool_down = True
@@ -1384,6 +1587,10 @@ def create_section_cnc_job(
                 except Exception:
                     flip_x_axis = False
                 try:
+                    move_xy_zero = bool(self.move_xy_zero_check.isChecked())
+                except Exception:
+                    move_xy_zero = False
+                try:
                     split_solids = bool(self.split_solids_check.isChecked())
                 except Exception:
                     split_solids = False
@@ -1392,13 +1599,35 @@ def create_section_cnc_job(
                         sorted(
                             [
                                 str(option.get("name", "") or "")
-                                for option, cb in self.tool_checkboxes
+                                for option, cb, _, _ in self.tool_checkboxes
                                 if cb.isChecked() and str(option.get("name", "") or "")
                             ]
                         )
                     )
                 except Exception:
                     selected_bits = tuple()
+                try:
+                    selected_template_key = _template_key(template_path)
+                    selected_settings_raw = self._bit_settings_by_template.get(selected_template_key, {})
+                    selected_bit_settings = []
+                    for option, cb, step_spin, speed_spin in self.tool_checkboxes:
+                        if not cb.isChecked():
+                            continue
+                        bit_name = str(option.get("name", "") or "").strip()
+                        if not bit_name:
+                            continue
+                        try:
+                            step_val = round(float(step_spin.value()), 6)
+                        except Exception:
+                            step_val = 0.0
+                        try:
+                            speed_val = round(float(speed_spin.value()), 6)
+                        except Exception:
+                            speed_val = 0.0
+                        selected_bit_settings.append((bit_name, step_val, speed_val))
+                    selected_bit_settings = tuple(sorted(selected_bit_settings))
+                except Exception:
+                    selected_bit_settings = tuple()
                 return (
                     section_name,
                     template_path,
@@ -1406,12 +1635,13 @@ def create_section_cnc_job(
                     final_depth,
                     nest_gap,
                     glue_clearance,
-                    rotate_180,
                     flip_x_axis,
+                    move_xy_zero,
                     split_solids,
                     keep_tool_down,
                     min_travel,
                     selected_bits,
+                    selected_bit_settings,
                 )
 
             def _run_creation(self, close_after=True):
@@ -1446,8 +1676,8 @@ def create_section_cnc_job(
                     selected_glue_clearance = float(self.glue_clearance_spin.value())
                 except Exception:
                     selected_glue_clearance = 0.0
-                selected_rotate = bool(self.rotate_xup_check.isChecked())
                 selected_flip_x_axis = bool(self.flip_x_axis_check.isChecked())
+                selected_move_xy_zero = bool(self.move_xy_zero_check.isChecked())
                 selected_split_solids = bool(self.split_solids_check.isChecked())
                 selected_keep_tool_down = bool(self.keep_tool_down_check.isChecked())
                 selected_min_travel = bool(self.min_travel_check.isChecked())
@@ -1456,10 +1686,11 @@ def create_section_cnc_job(
                     if inlay_prefs is not None:
                         inlay_prefs.SetString("last_template_path", str(selected_template or ""))
                         inlay_prefs.SetInt("inlay_count", int(selected_count))
-                        inlay_prefs.SetBool("nest_rotate_180", bool(selected_rotate))
                         inlay_prefs.SetFloat("final_depth_in", float(selected_final_depth))
                         inlay_prefs.SetFloat("nest_gap_in", float(selected_nest_gap))
+                        inlay_prefs.SetBool("profile_flip_y_axis", bool(selected_flip_x_axis))
                         inlay_prefs.SetBool("profile_flip_x_axis", bool(selected_flip_x_axis))
+                        inlay_prefs.SetBool("profile_move_to_xy_zero", bool(selected_move_xy_zero))
                         inlay_prefs.SetBool("split_solids_to_docs", bool(selected_split_solids))
                         inlay_prefs.SetBool("profile_keep_tool_down", bool(selected_keep_tool_down))
                         inlay_prefs.SetBool("profile_min_travel", bool(selected_min_travel))
@@ -1468,22 +1699,86 @@ def create_section_cnc_job(
 
                 selected_tool_names = None
                 try:
+                    selected_template_key = ""
+                    try:
+                        selected_template_key = os.path.normpath(str(selected_template or "").strip()) if str(selected_template or "").strip() else ""
+                    except Exception:
+                        selected_template_key = str(selected_template or "")
+                    selected_settings_raw = dict(self._bit_settings_by_template.get(selected_template_key, {}) or {})
+
+                    def _effective_tool_value(option, ui_value, default_key):
+                        try:
+                            parsed_value = max(0.0, float(ui_value))
+                        except Exception:
+                            parsed_value = 0.0
+                        if parsed_value > 0.0:
+                            return parsed_value
+                        try:
+                            return max(0.0, float(option.get(default_key, 0.0) or 0.0))
+                        except Exception:
+                            return 0.0
+
                     selected_tool_names = [
-                        {
-                            "name": str(option.get("name", "") or "").strip(),
-                            "label": str(option.get("label", "") or "").strip(),
-                            "tool_label": str(option.get("tool_label", "") or "").strip(),
-                            "diameter_mm": float(option.get("diameter_mm", 0.0) or 0.0),
-                            "tool_number": option.get("tool_number", None),
-                            "display": str(option.get("display", "") or "").strip(),
-                        }
-                        for option, cb in self.tool_checkboxes
+                        dict(
+                            {
+                                "name": str(option.get("name", "") or "").strip(),
+                                "label": str(option.get("label", "") or "").strip(),
+                                "tool_label": str(option.get("tool_label", "") or "").strip(),
+                                "diameter_mm": float(option.get("diameter_mm", 0.0) or 0.0),
+                                "tool_number": option.get("tool_number", None),
+                                "display": str(option.get("display", "") or "").strip(),
+                                "stepdown_in": _effective_tool_value(
+                                    option,
+                                    step_spin.value() if step_spin is not None else 0.0,
+                                    "default_stepdown_in",
+                                ),
+                                "speed_ipm": _effective_tool_value(
+                                    option,
+                                    speed_spin.value() if speed_spin is not None else 0.0,
+                                    "default_speed_ipm",
+                                ),
+                            }
+                        )
+                        for option, cb, step_spin, speed_spin in self.tool_checkboxes
                         if cb.isChecked()
                     ]
                 except Exception:
                     selected_tool_names = None
                 try:
                     if inlay_prefs is not None and isinstance(selected_tool_names, list):
+                        try:
+                            updated_settings = dict(selected_settings_raw)
+                            for option, _, step_spin, speed_spin in self.tool_checkboxes:
+                                bit_name = str(option.get("name", "") or "").strip()
+                                if not bit_name:
+                                    continue
+                                try:
+                                    step_val = max(0.0, float(step_spin.value())) if step_spin is not None else 0.0
+                                except Exception:
+                                    step_val = 0.0
+                                if step_val <= 0.0:
+                                    try:
+                                        step_val = max(0.0, float(option.get("default_stepdown_in", 0.0) or 0.0))
+                                    except Exception:
+                                        step_val = 0.0
+                                try:
+                                    speed_val = max(0.0, float(speed_spin.value())) if speed_spin is not None else 0.0
+                                except Exception:
+                                    speed_val = 0.0
+                                if speed_val <= 0.0:
+                                    try:
+                                        speed_val = max(0.0, float(option.get("default_speed_ipm", 0.0) or 0.0))
+                                    except Exception:
+                                        speed_val = 0.0
+                                updated_settings[bit_name] = {"stepdown_in": step_val, "speed_ipm": speed_val}
+                            if selected_template_key:
+                                self._bit_settings_by_template[selected_template_key] = updated_settings
+                                inlay_prefs.SetString(
+                                    "selected_bit_settings_by_template_inlay",
+                                    json.dumps(self._bit_settings_by_template),
+                                )
+                        except Exception:
+                            pass
                         inlay_prefs.SetString("selected_tool_names", json.dumps(selected_tool_names))
                         selected_template_key = ""
                         try:
@@ -1506,6 +1801,7 @@ def create_section_cnc_job(
                         show_dialog=False,
                         selected_tool_names_override=selected_tool_names,
                         profile_flip_x_axis_override=selected_flip_x_axis,
+                        profile_move_to_xy_zero_override=selected_move_xy_zero,
                         profile_keep_tool_down_override=selected_keep_tool_down,
                         profile_min_travel_override=selected_min_travel,
                         profile_glue_clearance_override=selected_glue_clearance,
@@ -1555,6 +1851,7 @@ def create_section_cnc_job(
             profile_keep_tool_down,
             profile_min_travel,
             profile_flip_x_axis,
+            profile_move_to_xy_zero,
             profile_glue_clearance_in,
         )
         if did_split:
@@ -1564,8 +1861,8 @@ def create_section_cnc_job(
 
     # Inlay Job uses selected inlay geometry directly (or X-up model when count > 1).
 
-    def _create_flip_x_inlay_model(base_obj, flip_x_axis=False):
-        if not base_obj or not bool(flip_x_axis):
+    def _create_flip_y_inlay_model(base_obj, flip_y_axis=False):
+        if not base_obj or not bool(flip_y_axis):
             return base_obj, []
 
         try:
@@ -1573,169 +1870,65 @@ def create_section_cnc_job(
             if not source_shape or source_shape.isNull():
                 return base_obj, []
             bb = source_shape.BoundBox
-            plane_point = App.Vector(float(bb.Center.x), float(bb.Center.y), float(bb.Center.z))
-            mirrored_shape = source_shape.mirror(plane_point, App.Vector(0, 0, 1))
-            if not mirrored_shape or mirrored_shape.isNull():
+            rotated_shape = source_shape.copy()
+            center = App.Vector(float(bb.Center.x), float(bb.Center.y), float(bb.Center.z))
+            rotated_shape.rotate(center, App.Vector(0, 1, 0), 180.0)
+            if not rotated_shape or rotated_shape.isNull():
                 return base_obj, []
+            try:
+                rotated_bb = rotated_shape.BoundBox
+                dz = float(bb.ZMax) - float(rotated_bb.ZMax)
+                if abs(dz) > 1e-7:
+                    rotated_shape.translate(App.Vector(0.0, 0.0, dz))
+            except Exception:
+                pass
         except Exception as exc:
             try:
-                print(f"Flip Z axis mirror failed: {exc}")
+                print(f"Flip Y axis rotation failed: {exc}")
             except Exception:
                 pass
             return base_obj, []
 
         try:
-            flip_obj = doc.addObject("Part::Feature", _next_name("InlayFlipXModel"))
-            flip_obj.Label = f"{getattr(base_obj, 'Label', base_obj.Name)} Flip X"
-            flip_obj.Shape = mirrored_shape
-            print("Applied inlay Flip Z axis orientation (mirrored Z coordinates).")
+            flip_obj = doc.addObject("Part::Feature", _next_name("InlayFlipYModel"))
+            flip_obj.Label = f"{getattr(base_obj, 'Label', base_obj.Name)} Flip Y"
+            flip_obj.Shape = rotated_shape
+            print("Applied inlay Flip Y axis orientation (180° about Y, top re-aligned to Z0 reference).")
             return flip_obj, [flip_obj]
         except Exception:
             return base_obj, []
 
-    def _create_x_up_inlay_model(base_obj, count, alternate_rotate_180=True, nesting_gap_in=0.080):
-        if not base_obj or int(count) <= 1:
+    def _create_xy_zero_inlay_model(base_obj, move_to_xy_zero=False):
+        if not base_obj or not bool(move_to_xy_zero):
             return base_obj, []
 
         try:
-            shape = getattr(base_obj, "Shape", None)
-            if not shape or shape.isNull():
+            source_shape = getattr(base_obj, "Shape", None)
+            if not source_shape or source_shape.isNull():
                 return base_obj, []
-            bb = shape.BoundBox
-        except Exception:
-            return base_obj, []
-
-        clearance_mm = max(0.05, _inch_to_mm(nesting_gap_in))
-
-        def _bb_distance_mm(bb1, bb2):
+            moved_shape = source_shape.copy()
+            bb = moved_shape.BoundBox
+            dx = -float(bb.XMin)
+            dy = -float(bb.YMin)
+            dz = -float(bb.ZMin)
+            if abs(dx) <= 1e-7 and abs(dy) <= 1e-7 and abs(dz) <= 1e-7:
+                return base_obj, []
+            moved_shape.translate(App.Vector(dx, dy, dz))
+            if moved_shape.isNull():
+                return base_obj, []
+        except Exception as exc:
             try:
-                dx = max(0.0, float(max(bb1.XMin - bb2.XMax, bb2.XMin - bb1.XMax)))
-                dy = max(0.0, float(max(bb1.YMin - bb2.YMax, bb2.YMin - bb1.YMax)))
-                dz = max(0.0, float(max(bb1.ZMin - bb2.ZMax, bb2.ZMin - bb1.ZMax)))
-                return (dx * dx + dy * dy + dz * dz) ** 0.5
-            except Exception:
-                return 0.0
-
-        def _is_bb_clear_all(candidate_bb, placed_bbs):
-            try:
-                for placed_bb in placed_bbs:
-                    if _bb_distance_mm(candidate_bb, placed_bb) + 1e-6 < clearance_mm:
-                        return False
-            except Exception:
-                return False
-            return True
-
-        def _oriented_copy(idx):
-            shp = shape.copy()
-            did_rotate = False
-            if alternate_rotate_180 and (idx % 2 == 1):
-                try:
-                    shp.rotate(shp.BoundBox.Center, App.Vector(0, 0, 1), 180)
-                    did_rotate = True
-                except Exception:
-                    did_rotate = False
-            return shp, did_rotate
-
-        ylen = max(0.0, float(bb.YLength))
-        y_candidates = [0.0]
-        if ylen > 1e-6:
-            y_candidates.extend([
-                0.10 * ylen,
-                -0.10 * ylen,
-                0.20 * ylen,
-                -0.20 * ylen,
-            ])
-
-        shapes = []
-        shape_bbs = []
-        rotated_instances = 0
-        previous_xmax = None
-        search_step_mm = max(0.15, _inch_to_mm(0.01))
-
-        for idx in range(int(count)):
-            try:
-                seed_shape, did_rotate = _oriented_copy(idx)
-                if idx == 0:
-                    shapes.append(seed_shape)
-                    if did_rotate:
-                        rotated_instances += 1
-                    first_bb = seed_shape.BoundBox
-                    previous_xmax = float(first_bb.XMax)
-                    shape_bbs.append(first_bb)
-                    continue
-
-                seed_bb = seed_shape.BoundBox
-                flush_dx = 0.0
-                if previous_xmax is not None:
-                    flush_dx = max(0.0, previous_xmax - float(seed_bb.XMin) + clearance_mm)
-
-                start_dx = max(0.0, flush_dx - (0.55 * float(seed_bb.XLength)))
-                max_dx = max(flush_dx + _inch_to_mm(12.0), start_dx + float(seed_bb.XLength) * 1.6)
-                placed_shape = None
-                placed_xmax = None
-
-                for yoff in y_candidates:
-                    dx = start_dx
-                    while dx <= max_dx:
-                        final_candidate = seed_shape.copy()
-                        final_candidate.translate(App.Vector(dx, float(yoff), 0.0))
-                        candidate_bb = final_candidate.BoundBox
-                        if _is_bb_clear_all(candidate_bb, shape_bbs):
-                            candidate_xmax = float(candidate_bb.XMax)
-                            if placed_shape is None or candidate_xmax < placed_xmax - 1e-6:
-                                placed_shape = final_candidate
-                                placed_xmax = candidate_xmax
-                            break
-                        dx += search_step_mm
-
-                if placed_shape is None:
-                    fallback = seed_shape.copy()
-                    fallback_pitch = max(0.01, float(bb.XLength) + _inch_to_mm(0.1))
-                    fallback.translate(App.Vector(float(idx) * fallback_pitch, 0.0, 0.0))
-                    placed_shape = fallback
-                    placed_xmax = float(placed_shape.BoundBox.XMax)
-                    print(f"Nesting fallback used for instance {idx + 1}.")
-
-                shapes.append(placed_shape)
-                shape_bbs.append(placed_shape.BoundBox)
-                previous_xmax = placed_xmax
-                if did_rotate:
-                    rotated_instances += 1
-                print(f"Nested instance {idx + 1}/{int(count)}.")
-            except Exception as exc:
-                try:
-                    fallback = shape.copy()
-                    fallback_pitch = max(0.01, float(bb.XLength) + _inch_to_mm(0.1))
-                    fallback.translate(App.Vector(float(idx) * fallback_pitch, 0.0, 0.0))
-                    shapes.append(fallback)
-                    shape_bbs.append(fallback.BoundBox)
-                    previous_xmax = float(fallback.BoundBox.XMax)
-                    print(f"Nesting error at instance {idx + 1}; used safe fallback ({exc}).")
-                except Exception:
-                    print(f"Nesting failed at instance {idx + 1}: {exc}")
-
-        if len(shapes) <= 1:
-            return base_obj, []
-
-        try:
-            compound_shape = Part.makeCompound(shapes)
-            xup_obj = doc.addObject("Part::Feature", _next_name("InlayXUpModel"))
-            xup_obj.Label = f"{getattr(base_obj, 'Label', base_obj.Name)} X-up"
-            xup_obj.Shape = compound_shape
-
-            try:
-                base_pitch = float(bb.XLength) + _inch_to_mm(0.1)
-                baseline_span = (base_pitch * max(0, int(count) - 1)) + float(bb.XLength)
-                actual_span = float(compound_shape.BoundBox.XLength)
-                saved_span = max(0.0, baseline_span - actual_span)
-                print(f"Nesting X span: {actual_span / 25.4:.3f} in (saved {saved_span / 25.4:.3f} in vs fixed pitch).")
+                print(f"Move to X0 Y0 failed: {exc}")
             except Exception:
                 pass
+            return base_obj, []
 
-            if rotated_instances > 0:
-                print(f"Applied alternating 180° nesting rotation to {rotated_instances} instance(s).")
-            print(f"Nesting gap target: {clearance_mm / 25.4:.3f} in.")
-            return xup_obj, [xup_obj]
+        try:
+            moved_obj = doc.addObject("Part::Feature", _next_name("InlayXYZeroModel"))
+            moved_obj.Label = f"{getattr(base_obj, 'Label', base_obj.Name)} XY0"
+            moved_obj.Shape = moved_shape
+            print("Moved inlay model so XMin=0, YMin=0, and ZMin=0.")
+            return moved_obj, [moved_obj]
         except Exception:
             return base_obj, []
 
@@ -1747,75 +1940,68 @@ def create_section_cnc_job(
         or "x up" in target_label.lower()
     )
 
-    oriented_base_obj, oriented_created_items = _create_flip_x_inlay_model(target_obj, profile_flip_x_axis)
+    oriented_base_obj, oriented_created_items = _create_flip_y_inlay_model(target_obj, profile_flip_x_axis)
     if bool(profile_flip_x_axis) and oriented_base_obj is target_obj:
-        print("Flip Z axis requested but could not be applied; using original orientation.")
+        print("Flip Y axis requested but could not be applied; using original orientation.")
+
+    xy_zero_base_obj, xy_zero_created_items = _create_xy_zero_inlay_model(
+        oriented_base_obj,
+        profile_move_to_xy_zero,
+    )
+    if bool(profile_move_to_xy_zero) and xy_zero_base_obj is oriented_base_obj:
+        print("Move to X0 Y0 requested but could not be applied; using current placement.")
+
+    profile_base_obj = xy_zero_base_obj
+    transform_created_items = []
+    for _item in list(oriented_created_items or []) + list(xy_zero_created_items or []):
+        if _item and _item is not target_obj and _item not in transform_created_items:
+            transform_created_items.append(_item)
+
+    layout_created_items = []
+    if profile_base_obj and profile_base_obj is not target_obj:
+        layout_created_items.append(profile_base_obj)
+
+    for _item in transform_created_items:
+        if _item is profile_base_obj:
+            continue
+        try:
+            stale_name = str(getattr(_item, "Name", "") or "").strip()
+            if stale_name:
+                doc.removeObject(stale_name)
+        except Exception:
+            pass
+
+    array_requested_count = max(1, int(inlay_count))
+    array_copies = max(0, array_requested_count - 1)
+    array_offset_mm = 0.0
 
     if is_prebuilt_xup_target:
-        profile_base_obj, xup_created_items = oriented_base_obj, list(oriented_created_items or [])
-        print("Using existing X-up layout target; skipping auto X-up generation.")
-    else:
-        profile_base_obj, xup_created_items = _create_x_up_inlay_model(
-            oriented_base_obj,
-            inlay_count,
-            nest_rotate_180,
-            nest_gap_in,
-        )
-        if oriented_created_items:
-            xup_created_items = list(oriented_created_items) + list(xup_created_items or [])
-        if int(inlay_count) > 1 and profile_base_obj is oriented_base_obj:
-            print("Failed to create X-up inlay model; falling back to single inlay model.")
-        elif int(inlay_count) > 1:
-            print(f"Created X-up inlay model with {int(inlay_count)} instance(s).")
+        print("Using existing X-up layout target; CAM Array generation is skipped for this target.")
+    elif array_copies > 0:
+        try:
+            base_shape = getattr(profile_base_obj, "Shape", None)
+            bb = base_shape.BoundBox if base_shape and not base_shape.isNull() else None
+            if bb:
+                array_offset_mm = max(0.01, float(bb.XLength) + _inch_to_mm(nest_gap_in))
+        except Exception:
+            array_offset_mm = 0.0
+
+        if array_offset_mm > 0.0:
+            print(
+                f"Using CAM Array for inlay count: {array_requested_count} total "
+                f"({array_copies} additional) at "
+                f"{array_offset_mm / 25.4:.3f} in X spacing."
+            )
+        else:
+            print("Inlay count > 1 requested, but CAM Array spacing could not be determined; using single inlay.")
+            array_copies = 0
 
     job_models = [profile_base_obj]
 
-    def _as_mm(value):
-        try:
-            return float(getattr(value, "Value", value))
-        except Exception:
-            return 0.0
-
-    def _tool_diameter_mm(tc_obj):
-        try:
-            tool = getattr(tc_obj, "Tool", None)
-            d = getattr(tool, "Diameter", None)
-            return _as_mm(d)
-        except Exception:
-            return 0.0
-
-    def _job_tool_controllers_sorted_largest_first(job_obj):
-        try:
-            tools_group = list(getattr(getattr(job_obj, "Tools", None), "Group", None) or [])
-        except Exception:
-            tools_group = []
-
-        with_diameter = []
-        without_diameter = []
-        for tc in tools_group:
-            dmm = _tool_diameter_mm(tc)
-            if dmm > 0:
-                with_diameter.append((dmm, tc))
-            else:
-                without_diameter.append(tc)
-
-        with_diameter.sort(key=lambda item: item[0], reverse=True)
-        ordered = [tc for _, tc in with_diameter]
-        ordered.extend(without_diameter)
-        return ordered
-
-    def _selected_tool_labels_for_job(job_obj, selected_names):
-        selected_set = {str(name) for name in (selected_names or []) if str(name).strip()}
-        labels = []
-        try:
-            for tc in _job_tool_controllers_sorted_largest_first(job_obj):
-                tc_name = str(getattr(tc, "Name", "") or "")
-                if tc_name and tc_name in selected_set:
-                    tc_label = str(getattr(tc, "Label", "") or "").strip()
-                    labels.append(tc_label or tc_name)
-        except Exception:
-            pass
-        return labels
+    _as_mm = _as_mm_value
+    _tool_diameter_mm = _tool_diameter_mm_from_tc
+    _job_tool_controllers_sorted_largest_first = _sorted_job_tool_controllers_largest_first
+    _selected_tool_labels_for_job = _selected_tool_labels_for_job_names
 
     def _select_tool_names_for_inlay(job_obj, selected_override=None):
         ordered_tcs = _job_tool_controllers_sorted_largest_first(job_obj)
@@ -2005,7 +2191,7 @@ def create_section_cnc_job(
 
         default_names = _match_selected_names(persisted_names)
         if not default_names:
-            default_names = [str(getattr(tc, "Name", "")) for tc in ordered_tcs[:2] if getattr(tc, "Name", "")]
+            default_names = [str(getattr(tc, "Name", "")) for tc in ordered_tcs[:1] if getattr(tc, "Name", "")]
         if not default_names:
             default_names = [str(getattr(ordered_tcs[0], "Name", ""))]
 
@@ -2130,10 +2316,130 @@ def create_section_cnc_job(
                     break
         return edge_names
 
+    def _has_valid_view_proxy(op_obj):
+        try:
+            view_obj = getattr(op_obj, "ViewObject", None)
+            return bool(view_obj is not None and getattr(view_obj, "Proxy", None) is not None)
+        except Exception:
+            return False
+
+    def _remove_doc_object(op_obj):
+        if not op_obj:
+            return
+        try:
+            obj_name = str(getattr(op_obj, "Name", "") or "").strip()
+        except Exception:
+            obj_name = ""
+        if not obj_name:
+            return
+        try:
+            if doc.getObject(obj_name):
+                doc.removeObject(obj_name)
+        except Exception:
+            pass
+
+    def _create_cam_array_for_ops(job_obj, base_ops, copies, offset_mm):
+        if not job_obj or int(copies) <= 0 or float(offset_mm) <= 0.0:
+            return []
+
+        try:
+            import Path.Op.Gui.Array as PathArrayGui
+            import PathScripts.PathUtils as PathUtils
+        except Exception as exc:
+            print(f"CAM Array module unavailable: {exc}")
+            return []
+
+        valid_base_ops = []
+        for op_obj in list(base_ops or []):
+            try:
+                if op_obj and op_obj.isDerivedFrom("Path::Feature"):
+                    valid_base_ops.append(op_obj)
+            except Exception:
+                pass
+
+        if not valid_base_ops:
+            return []
+
+        grouped_ops = {}
+        skipped_without_tc = 0
+        for op_obj in valid_base_ops:
+            tc_obj = getattr(op_obj, "ToolController", None)
+            if not tc_obj:
+                skipped_without_tc += 1
+                continue
+            tc_name = str(getattr(tc_obj, "Name", "") or "")
+            if not tc_name:
+                skipped_without_tc += 1
+                continue
+            grouped_ops.setdefault(tc_name, []).append(op_obj)
+
+        if skipped_without_tc:
+            print(f"Skipped {skipped_without_tc} operation(s) without ToolController for CAM Array.")
+        if not grouped_ops:
+            print("No compatible operations available for CAM Array.")
+            return []
+
+        created_arrays = []
+        class _ButlerSafeViewProviderArray(PathArrayGui.ViewProviderArray):
+            def onDelete(self, vobj, args):
+                return True
+
+        for tc_name, tc_ops in grouped_ops.items():
+            try:
+                array_obj = doc.addObject("Path::FeaturePython", _next_name("Array"))
+                PathArrayGui.ObjectArray(array_obj)
+                array_obj.Base = list(tc_ops)
+                array_obj.Type = "Linear1D"
+                array_obj.Copies = int(copies)
+                array_obj.Offset = App.Vector(float(offset_mm), 0.0, 0.0)
+                try:
+                    if getattr(array_obj, "ViewObject", None):
+                        array_obj.ViewObject.Proxy = _ButlerSafeViewProviderArray(array_obj.ViewObject)
+                except Exception:
+                    pass
+                PathUtils.addToJob(array_obj)
+                try:
+                    base_label = f"Inlay CAM Array {tc_name}"
+                    existing = {str(getattr(o, "Label", "")) for o in (getattr(doc, "Objects", []) or [])}
+                    if base_label in existing:
+                        idx = 2
+                        while f"{base_label}_{idx}" in existing:
+                            idx += 1
+                        base_label = f"{base_label}_{idx}"
+                    array_obj.Label = base_label
+                except Exception:
+                    pass
+
+                if not _has_valid_view_proxy(array_obj):
+                    try:
+                        PathArrayGui.ObjectArray(array_obj)
+                        if getattr(array_obj, "ViewObject", None) is not None:
+                            array_obj.ViewObject.Proxy = _ButlerSafeViewProviderArray(array_obj.ViewObject)
+                    except Exception:
+                        pass
+
+                if not _has_valid_view_proxy(array_obj):
+                    print(f"Skipping CAM Array operation for tool '{tc_name}': missing ViewObject Proxy.")
+                    _remove_doc_object(array_obj)
+                    continue
+
+                created_arrays.append(array_obj)
+            except Exception as exc:
+                print(f"Failed to create CAM Array operation for tool '{tc_name}': {exc}")
+
+        try:
+            if created_arrays:
+                doc.recompute()
+        except Exception:
+            pass
+
+        return created_arrays
+
     def _create_profile_ops_for_inlay(
         job_obj,
         inlay_obj,
         selected_tool_names=None,
+        selected_tool_overrides=None,
         final_depth_inch=0.200,
         glue_clearance_inch=0.0,
         strict_selection=False,
@@ -2171,9 +2477,63 @@ def create_section_cnc_job(
                 print("No matching Inlay tool controllers for selected bit(s); skipping Profile operations.")
                 return []
             selected_tcs = ordered_tcs[:2] if len(ordered_tcs) >= 2 else ordered_tcs[:1]
+        if (not strict_selection) and len(selected_tcs) > 1:
+            selected_tcs = selected_tcs[:1]
         if not selected_tcs:
             print("No tool controllers available in Inlay Job.")
             return []
+
+        override_items = list(selected_tool_overrides or [])
+
+        def _resolve_override_for_tc(tc_obj):
+            if not override_items:
+                return {}
+            tc_name = str(getattr(tc_obj, "Name", "") or "").strip().lower()
+            tc_label = str(getattr(tc_obj, "Label", "") or "").strip().lower()
+            tool_obj = getattr(tc_obj, "Tool", None)
+            tool_label = str(getattr(tool_obj, "Label", "") or getattr(tool_obj, "Name", "") or "").strip().lower()
+            try:
+                tc_tool_number = int(getattr(tc_obj, "ToolNumber", -1))
+                if tc_tool_number < 0:
+                    tc_tool_number = None
+            except Exception:
+                tc_tool_number = None
+            try:
+                tc_diameter_mm = float(_tool_diameter_mm(tc_obj) or 0.0)
+            except Exception:
+                tc_diameter_mm = 0.0
+
+            for item in override_items:
+                if not isinstance(item, dict):
+                    continue
+                in_name = str(item.get("name", "") or "").strip().lower()
+                in_label = str(item.get("label", "") or "").strip().lower()
+                in_tool_label = str(item.get("tool_label", "") or "").strip().lower()
+                try:
+                    in_tool_number = item.get("tool_number", None)
+                    in_tool_number = int(in_tool_number) if in_tool_number is not None else None
+                except Exception:
+                    in_tool_number = None
+                try:
+                    in_diameter_mm = item.get("diameter_mm", None)
+                    in_diameter_mm = float(in_diameter_mm) if in_diameter_mm is not None else None
+                except Exception:
+                    in_diameter_mm = None
+                if (in_name and in_name == tc_name) or (in_label and in_label == tc_label) or (in_tool_label and in_tool_label == tool_label):
+                    return dict(item)
+                if in_tool_number is not None and tc_tool_number is not None:
+                    try:
+                        if int(in_tool_number) == int(tc_tool_number):
+                            return dict(item)
+                    except Exception:
+                        pass
+                if in_diameter_mm is not None and tc_diameter_mm > 0.0:
+                    try:
+                        if abs(float(in_diameter_mm) - float(tc_diameter_mm)) <= 1e-3:
+                            return dict(item)
+                    except Exception:
+                        pass
+            return {}
 
         def _sanitize_name_part(text):
             raw = str(text or "").strip()
@@ -2206,145 +2566,22 @@ def create_section_cnc_job(
             return f"{base_label}_{idx}"
 
         def _create_profile_with_selected_tc(name, parent_job, selected_tc):
-            original_ui = getattr(PathUtils, "UserInput", None)
-
-            class _ToolSelectionShim:
-                def selectedToolController(self):
-                    return selected_tc
-
-                def chooseToolController(self, controllers):
-                    if selected_tc in controllers:
-                        return selected_tc
-                    return controllers[0] if controllers else None
-
-            try:
-                if selected_tc is not None:
-                    PathUtils.UserInput = _ToolSelectionShim()
-                return PathProfile.Create(name, obj=None, parentJob=parent_job)
-            finally:
-                PathUtils.UserInput = original_ui
+            return _create_path_op_with_selected_tc(
+                PathUtils,
+                PathProfile.Create,
+                name,
+                parent_job,
+                selected_tc,
+            )
 
         def _create_pocket_with_selected_tc(name, parent_job, selected_tc):
-            original_ui = getattr(PathUtils, "UserInput", None)
-
-            class _ToolSelectionShim:
-                def selectedToolController(self):
-                    return selected_tc
-
-                def chooseToolController(self, controllers):
-                    if selected_tc in controllers:
-                        return selected_tc
-                    return controllers[0] if controllers else None
-
-            try:
-                if selected_tc is not None:
-                    PathUtils.UserInput = _ToolSelectionShim()
-                return PathPocketShape.Create(name, obj=None, parentJob=parent_job)
-            finally:
-                PathUtils.UserInput = original_ui
-
-        def _top_wire_edge_name_groups(obj_with_shape):
-            try:
-                full_shape = getattr(obj_with_shape, "Shape", None)
-                faces = list(getattr(full_shape, "Faces", []) or [])
-            except Exception:
-                return ([], [])
-            if not faces:
-                return ([], [])
-
-            max_z = None
-            top_faces = []
-            for face in faces:
-                try:
-                    surface = getattr(face, "Surface", None)
-                    if not isinstance(surface, Part.Plane):
-                        continue
-                    normal = face.normalAt(0.5, 0.5)
-                    if abs(float(getattr(normal, "z", 0.0)) - 1.0) > 1e-3:
-                        continue
-                    zmax = float(face.BoundBox.ZMax)
-                except Exception:
-                    continue
-                if (max_z is None) or (zmax > max_z + 1e-6):
-                    max_z = zmax
-                    top_faces = [face]
-                elif max_z is not None and abs(zmax - max_z) <= 1e-6:
-                    top_faces.append(face)
-
-            if not top_faces:
-                return ([], [])
-
-            try:
-                all_edges = list(getattr(full_shape, "Edges", []) or [])
-            except Exception:
-                all_edges = []
-            if not all_edges:
-                return ([], [])
-
-            def _wire_to_edge_names(wire_obj):
-                edge_names_local = []
-                for wire_edge in list(getattr(wire_obj, "Edges", []) or []):
-                    found = None
-                    for edge_idx, shape_edge in enumerate(all_edges, start=1):
-                        try:
-                            if shape_edge.isSame(wire_edge):
-                                found = f"Edge{edge_idx}"
-                                break
-                        except Exception:
-                            continue
-                    if found:
-                        edge_names_local.append(found)
-                return list(dict.fromkeys(edge_names_local))
-
-            def _wire_area(wire_obj):
-                try:
-                    return abs(float(Part.Face(wire_obj).Area))
-                except Exception:
-                    try:
-                        bb = wire_obj.BoundBox
-                        return abs(float(bb.XLength) * float(bb.YLength))
-                    except Exception:
-                        return 0.0
-
-            outer_groups = []
-            inner_groups = []
-
-            for top_face in top_faces:
-                try:
-                    wires = list(getattr(top_face, "Wires", []) or [])
-                except Exception:
-                    wires = []
-                if not wires:
-                    continue
-
-                try:
-                    outer_wire = max(wires, key=_wire_area)
-                except Exception:
-                    outer_wire = wires[0]
-
-                outer_names = _wire_to_edge_names(outer_wire)
-                if outer_names:
-                    outer_groups.append(outer_names)
-
-                for wire in wires:
-                    if wire is outer_wire:
-                        continue
-                    inner_names = _wire_to_edge_names(wire)
-                    if inner_names:
-                        inner_groups.append(inner_names)
-
-            def _dedupe(groups):
-                deduped = []
-                seen = set()
-                for group in groups:
-                    key = tuple(sorted(group))
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    deduped.append(group)
-                return deduped
-
-            return (_dedupe(outer_groups), _dedupe(inner_groups))
+            return _create_path_op_with_selected_tc(
+                PathUtils,
+                PathPocketShape.Create,
+                name,
+                parent_job,
+                selected_tc,
+            )
 
         def _horizontal_face_subnames_below_zero(obj_with_shape, z_tol=1e-6):
             try:
@@ -2371,9 +2608,51 @@ def create_section_cnc_job(
                     subs.append(f"Face{idx}")
             return list(dict.fromkeys(subs))
 
-        outer_edge_groups, inner_hole_edge_groups = _top_wire_edge_name_groups(inlay_obj)
-        if not outer_edge_groups:
-            outer_edge_groups = [[]]
+        def _top_planar_face_subnames(obj_with_shape, z_tol=1e-5):
+            try:
+                full_shape = getattr(obj_with_shape, "Shape", None)
+                faces = list(getattr(full_shape, "Faces", []) or [])
+            except Exception:
+                return []
+            if not faces:
+                return []
+
+            top_candidates = []
+            for idx, face in enumerate(faces, start=1):
+                try:
+                    surface = getattr(face, "Surface", None)
+                    if not isinstance(surface, Part.Plane):
+                        continue
+                    normal = face.normalAt(0.5, 0.5)
+                    if float(getattr(normal, "z", 0.0)) < 0.95:
+                        continue
+                    zmax = float(face.BoundBox.ZMax)
+                except Exception:
+                    continue
+                top_candidates.append((idx, zmax))
+
+            if not top_candidates:
+                return []
+
+            max_z = max(z for _, z in top_candidates)
+            tol = abs(float(z_tol))
+            subs = [f"Face{idx}" for idx, z in top_candidates if z >= (max_z - tol)]
+            return list(dict.fromkeys(subs))
+
+        top_face_subs = _top_planar_face_subnames(inlay_obj)
+        if not top_face_subs:
+            fallback_face = _best_face_subname_for_profile(inlay_obj)
+            if fallback_face:
+                top_face_subs = [fallback_face]
+
+        if not top_face_subs:
+            print("Inlay profile: no suitable top planar face found for Profile base.")
+            return []
+
+        try:
+            print(f"Inlay profile: using {len(top_face_subs)} top face(s) as Profile base.")
+        except Exception:
+            pass
 
 
         created_ops = []
@@ -2412,14 +2691,40 @@ def create_section_cnc_job(
             except Exception:
                 pass
 
-        for tc_idx, selected_tc in enumerate(selected_tcs):
-            op_specs = []
-            for outer_idx, outer_edges in enumerate(outer_edge_groups, start=1):
-                outer_suffix = "" if len(outer_edge_groups) == 1 else f"_Outer{outer_idx}"
-                op_specs.append(("Outside", outer_edges, outer_suffix))
-            if inner_hole_edge_groups:
-                for hole_idx, edge_group in enumerate(inner_hole_edge_groups, start=1):
-                    op_specs.append(("Inside", edge_group, f"_Hole{hole_idx}"))
+        for selected_tc in selected_tcs:
+            tc_override = _resolve_override_for_tc(selected_tc)
+            try:
+                speed_ipm = max(0.0, float(tc_override.get("speed_ipm", 0.0) or 0.0))
+            except Exception:
+                speed_ipm = 0.0
+            if speed_ipm > 0.0:
+                speed_mm_min = speed_ipm * 25.4
+                if hasattr(selected_tc, "HorizFeed"):
+                    try:
+                        selected_tc.HorizFeed = f"{speed_mm_min} mm/min"
+                    except Exception:
+                        try:
+                            selected_tc.HorizFeed.Value = speed_mm_min
+                        except Exception:
+                            pass
+                if hasattr(selected_tc, "VertFeed"):
+                    try:
+                        selected_tc.VertFeed = f"{speed_mm_min} mm/min"
+                    except Exception:
+                        try:
+                            selected_tc.VertFeed.Value = speed_mm_min
+                        except Exception:
+                            pass
+
+        for selected_tc in selected_tcs:
+            tc_override = _resolve_override_for_tc(selected_tc)
+            try:
+                stepdown_in = max(0.0, float(tc_override.get("stepdown_in", 0.0) or 0.0))
+            except Exception:
+                stepdown_in = 0.0
+            stepdown_mm = _inch_to_mm(stepdown_in) if stepdown_in > 0.0 else 0.0
+
+            op_specs = [("Outside", list(top_face_subs), "")]
 
             for side_value, base_subs, label_suffix in op_specs:
                 profile_op = _create_profile_with_selected_tc(_next_name("Profile"), job_obj, selected_tc)
@@ -2436,6 +2741,11 @@ def create_section_cnc_job(
                         _apply_toolpath_normal_color(profile_op, selected_tc)
                 except Exception:
                     pass
+
+                if not _has_valid_view_proxy(profile_op):
+                    print(f"Skipping profile op '{getattr(profile_op, 'Name', 'Profile')}': missing ViewObject Proxy.")
+                    _remove_doc_object(profile_op)
+                    continue
 
                 if selected_tc and hasattr(profile_op, "ToolController"):
                     try:
@@ -2471,6 +2781,20 @@ def create_section_cnc_job(
                     except Exception:
                         pass
 
+                if stepdown_mm > 0.0 and hasattr(profile_op, "StepDown"):
+                    try:
+                        if hasattr(profile_op, "setExpression"):
+                            profile_op.setExpression("StepDown", None)
+                    except Exception:
+                        pass
+                    try:
+                        profile_op.StepDown = f"{stepdown_mm} mm"
+                    except Exception:
+                        try:
+                            profile_op.StepDown.Value = stepdown_mm
+                        except Exception:
+                            pass
+
                 if hasattr(profile_op, "ExtraOffset"):
                     try:
                         if hasattr(profile_op, "setExpression"):
@@ -2484,13 +2808,28 @@ def create_section_cnc_job(
                         pass
 
                 try:
-                    if hasattr(profile_op, "setExpression"):
-                        profile_op.setExpression("FinalDepth", None)
-                except Exception:
-                    pass
+                    target_start_mm = abs(_inch_to_mm(final_depth_inch))
+                    target_final_mm = 0.0
 
-                try:
-                    target_final_mm = -abs(_inch_to_mm(final_depth_inch))
+                    if hasattr(profile_op, "setExpression"):
+                        try:
+                            profile_op.setExpression("StartDepth", None)
+                        except Exception:
+                            pass
+                        try:
+                            profile_op.setExpression("FinalDepth", None)
+                        except Exception:
+                            pass
+
+                    if hasattr(profile_op, "StartDepth"):
+                        try:
+                            profile_op.StartDepth = f"{target_start_mm} mm"
+                        except Exception:
+                            try:
+                                profile_op.StartDepth.Value = target_start_mm
+                            except Exception:
+                                pass
+
                     if hasattr(profile_op, "FinalDepth"):
                         try:
                             profile_op.FinalDepth = f"{target_final_mm} mm"
@@ -2519,97 +2858,6 @@ def create_section_cnc_job(
 
                 created_ops.append(profile_op)
 
-
-        lower_xy_face_subs = _horizontal_face_subnames_below_zero(inlay_obj)
-        if lower_xy_face_subs and selected_tcs:
-            selected_tc = selected_tcs[0]
-            pocket_op = _create_pocket_with_selected_tc(_next_name("PocketShape"), job_obj, selected_tc)
-            if pocket_op:
-
-                try:
-                    if getattr(pocket_op, "ViewObject", None):
-                        pocket_op.ViewObject.Proxy = PathOpGuiBase.ViewProvider(
-                            pocket_op.ViewObject,
-                            PathPocketShapeGui.Command.res,
-                        )
-                        pocket_op.ViewObject.Visibility = True
-                        _apply_toolpath_normal_color(pocket_op, selected_tc)
-                except Exception:
-                    pass
-
-                if selected_tc and hasattr(pocket_op, "ToolController"):
-                    try:
-                        pocket_op.ToolController = selected_tc
-                    except Exception:
-                        pass
-
-                try:
-                    pocket_op.Label = _unique_label(f"PocketShape_{_bit_name(selected_tc)}_LowerXY")
-                except Exception:
-                    pass
-
-                try:
-                    pocket_op.Base = [(inlay_obj, list(lower_xy_face_subs or []))]
-                except Exception:
-                    pass
-
-                if hasattr(pocket_op, "UseRestMachining"):
-                    try:
-                        pocket_op.UseRestMachining = False
-                    except Exception:
-                        pass
-                if hasattr(pocket_op, "RestMachining"):
-                    try:
-                        pocket_op.RestMachining = False
-                    except Exception:
-                        pass
-
-                if hasattr(pocket_op, "KeepToolDown"):
-                    try:
-                        pocket_op.KeepToolDown = bool(keep_tool_down)
-                    except Exception:
-                        pass
-
-                if hasattr(pocket_op, "MinTravel"):
-                    try:
-                        pocket_op.MinTravel = bool(min_travel)
-                    except Exception:
-                        pass
-
-                try:
-                    if hasattr(pocket_op, "setExpression"):
-                        pocket_op.setExpression("FinalDepth", None)
-                except Exception:
-                    pass
-
-                try:
-                    target_final_mm = -abs(_inch_to_mm(final_depth_inch))
-                    if hasattr(pocket_op, "FinalDepth"):
-                        try:
-                            pocket_op.FinalDepth = f"{target_final_mm} mm"
-                        except Exception:
-                            try:
-                                pocket_op.FinalDepth.Value = target_final_mm
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-
-                try:
-                    doc.recompute()
-                except Exception:
-                    pass
-
-                _apply_toolpath_normal_color(pocket_op, selected_tc)
-
-                try:
-                    cmds = getattr(getattr(pocket_op, "Path", None), "Commands", None)
-                    if not cmds or len(cmds) == 0:
-                        print(f"Pocket path failed for '{getattr(pocket_op, 'Label', pocket_op.Name)}'.")
-                    else:
-                        created_ops.append(pocket_op)
-                except Exception:
-                    created_ops.append(pocket_op)
 
         try:
             doc.recompute()
@@ -2645,7 +2893,39 @@ def create_section_cnc_job(
 
         return created_ops
 
+    tx_open = False
+    tx_done = False
+
+    def _commit_inlay_tx():
+        if _BUTLER_DISABLE_CAM_UNDO:
+            return
+        nonlocal tx_open, tx_done
+        if not tx_open or tx_done:
+            return
+        try:
+            if hasattr(doc, "commitTransaction"):
+                doc.commitTransaction()
+                tx_done = True
+        except Exception:
+            pass
+
+    def _abort_inlay_tx():
+        if _BUTLER_DISABLE_CAM_UNDO:
+            return
+        nonlocal tx_open, tx_done
+        if not tx_open or tx_done:
+            return
+        try:
+            if hasattr(doc, "abortTransaction"):
+                doc.abortTransaction()
+            tx_done = True
+        except Exception:
+            pass
+
     try:
+        if (not _BUTLER_DISABLE_CAM_UNDO) and hasattr(doc, "openTransaction"):
+            doc.openTransaction("Create Inlay CAM Job")
+            tx_open = True
         active_view = None
         previous_body = None
         previous_part = None
@@ -2701,38 +2981,45 @@ def create_section_cnc_job(
             job_live,
             profile_base_obj,
             selected_tool_names,
-            inlay_final_depth_in,
-            profile_glue_clearance_in,
+            selected_tool_overrides=selected_tool_names_override,
+            final_depth_inch=inlay_final_depth_in,
+            glue_clearance_inch=profile_glue_clearance_in,
             strict_selection=bool(selected_tool_names_override),
             keep_tool_down=bool(profile_keep_tool_down),
             min_travel=bool(profile_min_travel),
         )
+        created_array_ops = []
+        if (not is_prebuilt_xup_target) and array_copies > 0 and array_offset_mm > 0.0:
+            created_array_ops = list(
+                _create_cam_array_for_ops(job_live, created_profile_ops, array_copies, array_offset_mm) or []
+            )
 
         selected_tool_labels = _selected_tool_labels_for_job(job_live, selected_tool_names)
         inlay_settings = {
             "TemplatePath": str(effective_template_path or ""),
             "SelectedTools": ", ".join(str(label) for label in (selected_tool_labels or [])),
             "InlayCount": int(inlay_count),
-            "NestRotate180": bool(nest_rotate_180),
             "FinalDepthIn": float(inlay_final_depth_in),
             "GlueClearanceIn": float(profile_glue_clearance_in),
             "NestGapIn": float(nest_gap_in),
+            "ArrayMode": "CAM_Array" if ((not is_prebuilt_xup_target) and array_copies > 0 and array_offset_mm > 0.0) else "Model",
             "KeepToolDown": bool(profile_keep_tool_down),
             "MinTravel": bool(profile_min_travel),
-            "FlipXAxis": bool(profile_flip_x_axis),
+            "FlipYAxis": bool(profile_flip_x_axis),
+            "MoveToXYZero": bool(profile_move_to_xy_zero),
             "SplitSolidsToDocs": bool(split_solids_to_docs),
             "Fixture": "G54",
         }
 
         auto_container = _create_auto_container(
             target_obj,
-            xup_created_items + [job_live],
+            layout_created_items + [job_live],
             inlay_final_depth_in,
             settings=inlay_settings,
             parent_group=parent_group_override,
         )
         _expand_container_in_tree(auto_container)
-        _expand_targets_in_tree([job_live] + list(created_profile_ops or []))
+        _expand_targets_in_tree([job_live] + list(created_profile_ops or []) + list(created_array_ops or []))
 
         try:
             if target_obj and getattr(target_obj, "ViewObject", None):
@@ -2748,6 +3035,7 @@ def create_section_cnc_job(
             print(traceback.format_exc())
         except Exception:
             pass
+        _abort_inlay_tx()
         return
 
     try:
@@ -2761,6 +3049,7 @@ def create_section_cnc_job(
     job_for_msg = doc.getObject(job_name) if 'job_name' in locals() and job_name else job_live
     if not job_for_msg:
         print("Inlay Job creation did not produce a persistent job object.")
+        _abort_inlay_tx()
         return
 
     if effective_template_path:
@@ -2768,10 +3057,11 @@ def create_section_cnc_job(
     else:
         print(f"Created Inlay Job '{job_for_msg.Label}' with default CAM setup.")
 
+    _commit_inlay_tx()
     _record_undo_cleanup_bundle()
 
 
-def create_xup_nesting_layout(target=None, count=None, nesting_gap_in=None, rotate_180=None, show_dialog=True):
+def create_xup_nesting_layout(target=None, count=None, nesting_gap_in=None, show_dialog=True):
     doc = App.ActiveDocument
     if not doc:
         print("No active document.")
@@ -2866,17 +3156,10 @@ def create_xup_nesting_layout(target=None, count=None, nesting_gap_in=None, rota
 
     inlay_prefs = None
     inlay_count = 4
-    nest_rotate_180 = True
     nest_gap = 0.080
     try:
         inlay_prefs = App.ParamGet("User parameter:BaseApp/Preferences/Mod/ButlerCues/InlayJob")
         inlay_count = max(1, int(inlay_prefs.GetInt("inlay_count", 4)))
-        nest_rotate_180 = bool(
-            inlay_prefs.GetBool(
-                "nest_rotate_180",
-                inlay_prefs.GetBool("auto_rotate_xup", True),
-            )
-        )
         nest_gap = max(0.0, float(inlay_prefs.GetFloat("nest_gap_in", 0.080)))
     except Exception:
         inlay_prefs = None
@@ -2891,12 +3174,6 @@ def create_xup_nesting_layout(target=None, count=None, nesting_gap_in=None, rota
             nest_gap = max(0.0, float(nesting_gap_in))
         except Exception:
             pass
-    if rotate_180 is not None:
-        try:
-            nest_rotate_180 = bool(rotate_180)
-        except Exception:
-            pass
-
     default_target = doc.getObject("Body002")
     if not _is_valid_shape_candidate(default_target):
         default_target = candidates[0]
@@ -2931,13 +3208,9 @@ def create_xup_nesting_layout(target=None, count=None, nesting_gap_in=None, rota
         nest_gap_spin.setSingleStep(0.005)
         nest_gap_spin.setValue(float(nest_gap))
 
-        rotate_xup_check = QtGui.QCheckBox("Alternate 180° rotation")
-        rotate_xup_check.setChecked(bool(nest_rotate_180))
-
         layout.addRow("Target", target_combo)
         layout.addRow("Count (X-up)", inlay_count_spin)
         layout.addRow("Gap (in)", nest_gap_spin)
-        layout.addRow("Orientation", rotate_xup_check)
 
         buttons = QtGui.QDialogButtonBox(QtGui.QDialogButtonBox.Ok | QtGui.QDialogButtonBox.Cancel)
         buttons.accepted.connect(dialog.accept)
@@ -2955,12 +3228,9 @@ def create_xup_nesting_layout(target=None, count=None, nesting_gap_in=None, rota
 
         inlay_count = max(1, int(inlay_count_spin.value()))
         nest_gap = max(0.0, float(nest_gap_spin.value()))
-        nest_rotate_180 = bool(rotate_xup_check.isChecked())
-
         try:
             if inlay_prefs is not None:
                 inlay_prefs.SetInt("inlay_count", int(inlay_count))
-                inlay_prefs.SetBool("nest_rotate_180", bool(nest_rotate_180))
                 inlay_prefs.SetFloat("nest_gap_in", float(nest_gap))
         except Exception:
             pass
@@ -3027,17 +3297,11 @@ def create_xup_nesting_layout(target=None, count=None, nesting_gap_in=None, rota
     solved_shapes = []
     previous_xmax = None
     for idx in range(int(inlay_count)):
-        angle = 180.0 if (nest_rotate_180 and (idx % 2 == 1)) else 0.0
         seed_shape = shape.copy()
-        if angle:
-            try:
-                seed_shape.rotate(seed_shape.BoundBox.Center, App.Vector(0, 0, 1), angle)
-            except Exception:
-                pass
 
         if idx == 0:
             solved_shape = seed_shape.copy()
-            placements.append((0.0, 0.0, angle))
+            placements.append((0.0, 0.0))
             solved_shapes.append(solved_shape)
             previous_xmax = float(solved_shape.BoundBox.XMax)
             continue
@@ -3080,7 +3344,7 @@ def create_xup_nesting_layout(target=None, count=None, nesting_gap_in=None, rota
             best_y = 0.0
             print(f"Nesting fallback used for instance {idx + 1}.")
 
-        placements.append((best_dx, best_y, angle))
+        placements.append((best_dx, best_y))
         solved_shapes.append(best_shape)
         previous_xmax = float(best_shape.BoundBox.XMax)
 
@@ -3118,16 +3382,9 @@ def create_xup_nesting_layout(target=None, count=None, nesting_gap_in=None, rota
         source_binder = None
 
     layout_items = []
-    rotated_instances = 0
-    center_vec = App.Vector(float(bb.Center.x), float(bb.Center.y), float(bb.Center.z))
     for idx in range(int(inlay_count)):
-        dx, dy, angle = placements[idx] if idx < len(placements) else (float(idx) * x_pitch, 0.0, 0.0)
-        if angle:
-            rotated_instances += 1
-        rotation = App.Rotation(App.Vector(0, 0, 1), angle)
-        center_after = rotation.multVec(center_vec)
-        base_vec = App.Vector(float(dx), float(dy), 0.0).add(center_vec.sub(center_after))
-        placement = App.Placement(base_vec, rotation)
+        dx, dy = placements[idx] if idx < len(placements) else (float(idx) * x_pitch, 0.0)
+        placement = App.Placement(App.Vector(float(dx), float(dy), 0.0), App.Rotation())
 
         try:
             if source_binder:
@@ -3146,8 +3403,6 @@ def create_xup_nesting_layout(target=None, count=None, nesting_gap_in=None, rota
         except Exception:
             try:
                 copy_shape = shape.copy()
-                if angle:
-                    copy_shape.rotate(copy_shape.BoundBox.Center, App.Vector(0, 0, 1), angle)
                 copy_shape.translate(App.Vector(float(idx) * x_pitch, 0.0, 0.0))
                 fallback = doc.addObject("Part::Feature", _next_name("XUpNestPart"))
                 fallback.Label = f"{getattr(target_obj, 'Label', target_obj.Name)} Nest {idx + 1}"
@@ -3186,8 +3441,6 @@ def create_xup_nesting_layout(target=None, count=None, nesting_gap_in=None, rota
         else:
             print(f"Created {len(layout_items)} editable nesting item(s) as shape copies.")
         print(f"Gap target: {gap_mm / 25.4:.3f} in.")
-        if rotated_instances > 0:
-            print(f"Applied alternating 180° rotation to {rotated_instances} instance(s).")
         return xup_obj
     except Exception as exc:
         print(f"Failed to create X-up nesting layout: {exc}")
@@ -3204,13 +3457,30 @@ def create_pocket_cnc_job(
     pocket_min_travel_override=None,
     pocket_skip_large_if_under_minutes_override=None,
     pocket_skip_large_minutes_threshold_override=None,
+    skip_fillet_warning=False,
 ):
     doc = App.ActiveDocument
     if not doc:
         print("No active document.")
         return
 
-    _ensure_butler_container_cleanup_observer()
+    if _BUTLER_DISABLE_CAM_UNDO:
+        try:
+            _disable_butler_container_cleanup_observer()
+            doc_name = str(getattr(doc, "Name", "") or "").strip()
+            if doc_name:
+                _butler_undo_cleanup_bundles.pop(doc_name, None)
+        except Exception:
+            pass
+    else:
+        _ensure_butler_container_cleanup_observer()
+
+    try:
+        doc_name = str(getattr(doc, "Name", "") or "").strip()
+        if doc_name:
+            _butler_undo_cleanup_bundles.pop(doc_name, None)
+    except Exception:
+        pass
 
     pre_object_names = set()
     try:
@@ -3219,23 +3489,7 @@ def create_pocket_cnc_job(
         pre_object_names = set()
 
     def _record_undo_cleanup_bundle():
-        try:
-            if not _butler_enable_undo_cleanup_observer:
-                return
-            current_names = [
-                str(getattr(obj, "Name", "") or "")
-                for obj in (getattr(doc, "Objects", []) or [])
-                if str(getattr(obj, "Name", "") or "") not in pre_object_names
-            ]
-            current_names = [name for name in current_names if name]
-            if not current_names:
-                return
-            doc_name = str(getattr(doc, "Name", "") or "").strip()
-            if not doc_name:
-                return
-            _butler_undo_cleanup_bundles.setdefault(doc_name, []).append(current_names)
-        except Exception:
-            pass
+        return
 
     try:
         import Path.Main.Job as PathJob
@@ -3267,6 +3521,17 @@ def create_pocket_cnc_job(
         candidate = _unwrap_candidate(obj)
         if not candidate:
             return False
+        try:
+            if bool(getattr(candidate, "ButlerIsPocketModel", False)):
+                return True
+        except Exception:
+            pass
+        try:
+            workflow_tag = str(getattr(candidate, "ButlerCuesWorkflow", "") or "").strip().lower()
+            if workflow_tag == "pocket model":
+                return True
+        except Exception:
+            pass
         for prop_name in (
             "FilletRadiusInch",
             "FilletSettingsSummary",
@@ -3444,6 +3709,7 @@ def create_pocket_cnc_job(
         side_margin = _inch_to_mm(0.1)
         y_extra = _inch_to_mm(0.1)
         z_extra = _inch_to_mm(0.01)
+        top_breakthrough_mm = _inch_to_mm(0.002)
 
         x_min = float(bb.XMin) - side_margin
         x_len = float(bb.XLength) + (2.0 * side_margin)
@@ -3469,6 +3735,17 @@ def create_pocket_cnc_job(
                 tool_shape = _strip_shape_history(inlay_shape.copy())
             except Exception:
                 tool_shape = _strip_shape_history(inlay_shape)
+            try:
+                tool_bb = tool_shape.BoundBox if tool_shape and not tool_shape.isNull() else None
+            except Exception:
+                tool_bb = None
+            if tool_bb is not None:
+                try:
+                    dz = float(top_breakthrough_mm) - float(tool_bb.ZMax)
+                    if abs(dz) > 1e-6:
+                        tool_shape.translate(App.Vector(0.0, 0.0, dz))
+                except Exception:
+                    pass
 
             result_shape = blank_shape
             tool_shapes = _iter_cut_tools(tool_shape)
@@ -3736,7 +4013,7 @@ def create_pocket_cnc_job(
         except Exception:
             pass
 
-    def _non_top_faces_grouped_by_z(model_obj, z_merge_tol=1e-3):
+    def _non_top_faces_grouped_by_z(model_obj, z_merge_tol=0.05):
         try:
             shape = getattr(model_obj, "Shape", None)
             faces = list(getattr(shape, "Faces", []) or [])
@@ -3745,20 +4022,27 @@ def create_pocket_cnc_job(
         if not faces:
             return []
 
+        def _face_normal(face_obj):
+            try:
+                u0, u1, v0, v1 = face_obj.ParameterRange
+                u_mid = 0.5 * (float(u0) + float(u1))
+                v_mid = 0.5 * (float(v0) + float(v1))
+                return face_obj.normalAt(u_mid, v_mid)
+            except Exception:
+                try:
+                    return face_obj.normalAt(0.0, 0.0)
+                except Exception:
+                    return None
+
         tol = 1e-6
         xy_faces = []
         for idx, face in enumerate(faces, start=1):
-            try:
-                surface = getattr(face, "Surface", None)
-                is_planar = isinstance(surface, Part.Plane)
-            except Exception:
-                is_planar = False
-            if not is_planar:
+            normal = _face_normal(face)
+            if normal is None:
                 continue
 
             try:
-                normal = face.normalAt(0.0, 0.0)
-                if abs(float(getattr(normal, "z", 0.0))) < 0.95:
+                if float(getattr(normal, "z", 0.0)) < 0.95:
                     continue
             except Exception:
                 continue
@@ -3770,13 +4054,12 @@ def create_pocket_cnc_job(
 
             xy_faces.append((idx, center_z))
 
-        if len(xy_faces) <= 2:
+        if len(xy_faces) <= 1:
             return []
 
         max_z = max(z for _, z in xy_faces)
-        min_z = min(z for _, z in xy_faces)
 
-        middle_faces = [(idx, z) for idx, z in xy_faces if (z < max_z - tol and z > min_z + tol)]
+        middle_faces = [(idx, z) for idx, z in xy_faces if (z < max_z - tol)]
         if not middle_faces:
             return []
 
@@ -3825,6 +4108,7 @@ def create_pocket_cnc_job(
         glue_oversize_inch,
         final_depth_inch,
         selected_tool_names=None,
+        selected_tool_overrides=None,
         keep_tool_down=True,
         min_travel=True,
         skip_large_if_under_minutes=False,
@@ -3927,32 +4211,177 @@ def create_pocket_cnc_job(
 
             return ordered[:2] if len(ordered) >= 2 else ordered[:1]
 
+        override_items = list(selected_tool_overrides or [])
+
+        def _resolve_override_for_tc(tc_obj):
+            if not override_items:
+                return {}
+            tc_name = str(getattr(tc_obj, "Name", "") or "").strip().lower()
+            tc_label = str(getattr(tc_obj, "Label", "") or "").strip().lower()
+            tool_obj = getattr(tc_obj, "Tool", None)
+            tool_label = str(getattr(tool_obj, "Label", "") or getattr(tool_obj, "Name", "") or "").strip().lower()
+            try:
+                tc_tool_number = int(getattr(tc_obj, "ToolNumber", -1))
+                if tc_tool_number < 0:
+                    tc_tool_number = None
+            except Exception:
+                tc_tool_number = None
+            try:
+                tc_diameter_mm = float(_tool_diameter_mm(tc_obj) or 0.0)
+            except Exception:
+                tc_diameter_mm = 0.0
+
+            for item in override_items:
+                if not isinstance(item, dict):
+                    continue
+                in_name = str(item.get("name", "") or "").strip().lower()
+                in_label = str(item.get("label", "") or "").strip().lower()
+                in_tool_label = str(item.get("tool_label", "") or "").strip().lower()
+                try:
+                    in_tool_number = item.get("tool_number", None)
+                    in_tool_number = int(in_tool_number) if in_tool_number is not None else None
+                except Exception:
+                    in_tool_number = None
+                try:
+                    in_diameter_mm = item.get("diameter_mm", None)
+                    in_diameter_mm = float(in_diameter_mm) if in_diameter_mm is not None else None
+                except Exception:
+                    in_diameter_mm = None
+                if (in_name and in_name == tc_name) or (in_label and in_label == tc_label) or (in_tool_label and in_tool_label == tool_label):
+                    return dict(item)
+                if in_tool_number is not None and tc_tool_number is not None:
+                    try:
+                        if int(in_tool_number) == int(tc_tool_number):
+                            return dict(item)
+                    except Exception:
+                        pass
+                if in_diameter_mm is not None and tc_diameter_mm > 0.0:
+                    try:
+                        if abs(float(in_diameter_mm) - float(tc_diameter_mm)) <= 1e-3:
+                            return dict(item)
+                    except Exception:
+                        pass
+            return {}
+
         def _create_pocket_with_selected_tc(name, parent_job, selected_tc):
-            original_ui = getattr(PathUtils, "UserInput", None)
+            return _create_path_op_with_selected_tc(
+                PathUtils,
+                PathPocketShape.Create,
+                name,
+                parent_job,
+                selected_tc,
+            )
 
-            class _ToolSelectionShim:
-                def selectedToolController(self):
-                    return selected_tc
+        def _create_adaptive_with_selected_tc(name, parent_job, selected_tc):
+            return _create_path_op_with_selected_tc(
+                PathUtils,
+                PathAdaptive.Create,
+                name,
+                parent_job,
+                selected_tc,
+            )
 
-                def chooseToolController(self, controllers):
-                    if selected_tc in controllers:
-                        return selected_tc
-                    return controllers[0] if controllers else None
+        def _has_valid_view_proxy(op_obj):
+            try:
+                view_obj = getattr(op_obj, "ViewObject", None)
+                return bool(view_obj is not None and getattr(view_obj, "Proxy", None) is not None)
+            except Exception:
+                return False
+
+        def _remove_doc_object(op_obj):
+            if not op_obj:
+                return
+            try:
+                obj_name = str(getattr(op_obj, "Name", "") or "").strip()
+            except Exception:
+                obj_name = ""
+            if not obj_name:
+                return
+            try:
+                if doc.getObject(obj_name):
+                    doc.removeObject(obj_name)
+            except Exception:
+                pass
+
+        def _clean_detached_shape(shape_obj):
+            if not shape_obj:
+                return shape_obj
+            try:
+                brep = shape_obj.exportBrepToString()
+                clean = Part.Shape()
+                clean.importBrepFromString(brep)
+                try:
+                    clean = clean.removeSplitter()
+                except Exception:
+                    pass
+                return clean
+            except Exception:
+                return shape_obj
+
+        def _build_detached_region_obj(base_obj, face_subs, level_index):
+            try:
+                base_shape = getattr(base_obj, "Shape", None)
+                base_faces = list(getattr(base_shape, "Faces", []) or [])
+            except Exception:
+                base_faces = []
+            if not base_faces:
+                return None, []
+
+            detached_faces = []
+            for sub in list(face_subs or []):
+                face_obj = None
+                try:
+                    if hasattr(base_shape, "getElement"):
+                        face_obj = base_shape.getElement(str(sub))
+                except Exception:
+                    face_obj = None
+                if face_obj is None:
+                    try:
+                        face_index = int(str(sub).replace("Face", "")) - 1
+                        if 0 <= face_index < len(base_faces):
+                            face_obj = base_faces[face_index]
+                    except Exception:
+                        face_obj = None
+                if face_obj is None:
+                    continue
+                try:
+                    detached_faces.append(_clean_detached_shape(face_obj.copy()))
+                except Exception:
+                    try:
+                        detached_faces.append(_clean_detached_shape(face_obj))
+                    except Exception:
+                        pass
+
+            if not detached_faces:
+                return None, []
 
             try:
-                if selected_tc is not None:
-                    PathUtils.UserInput = _ToolSelectionShim()
-                return PathPocketShape.Create(name, obj=None, parentJob=parent_job)
-            finally:
-                PathUtils.UserInput = original_ui
+                region_shape = Part.makeCompound(detached_faces) if len(detached_faces) > 1 else detached_faces[0]
+            except Exception:
+                region_shape = detached_faces[0]
+            region_shape = _clean_detached_shape(region_shape)
+
+            try:
+                region_obj = doc.addObject("Part::Feature", _next_name("PocketRegion"))
+                region_obj.Label = f"PocketRegion_L{int(level_index)}"
+                region_obj.Shape = region_shape
+                if getattr(region_obj, "ViewObject", None):
+                    region_obj.ViewObject.Visibility = False
+                doc.recompute()
+                region_face_names = [f"Face{i}" for i in range(1, len(list(getattr(region_obj.Shape, 'Faces', []) or [])) + 1)]
+                return region_obj, region_face_names
+            except Exception:
+                return None, []
 
         try:
             import Path.Op.PocketShape as PathPocketShape
             import Path.Op.Gui.PocketShape as PathPocketShapeGui
+            import Path.Op.Adaptive as PathAdaptive
+            import Path.Op.Gui.Adaptive as PathAdaptiveGui
             import Path.Op.Gui.Base as PathOpGuiBase
             import PathScripts.PathUtils as PathUtils
         except Exception as exc:
-            print(f"Pocket Shape module unavailable: {exc}")
+            print(f"Pocket/Adaptive module unavailable: {exc}")
             return []
 
         face_levels = _non_top_faces_grouped_by_z(model_obj)
@@ -3960,6 +4389,7 @@ def create_pocket_cnc_job(
             print("No interior XY-plane faces found for Pocket operation.")
             return []
         face_names = [sub for level in face_levels for sub in (level.get("subs", []) or [])]
+        multi_level_pocket = len(face_levels) > 1
 
         try:
             created_ops = []
@@ -4099,6 +4529,31 @@ def create_pocket_cnc_job(
                 print("No tool controllers available in Pocket Job.")
                 return []
 
+            for selected_tc in selected_tcs:
+                tc_override = _resolve_override_for_tc(selected_tc)
+                try:
+                    speed_ipm = max(0.0, float(tc_override.get("speed_ipm", 0.0) or 0.0))
+                except Exception:
+                    speed_ipm = 0.0
+                if speed_ipm > 0.0:
+                    speed_mm_min = speed_ipm * 25.4
+                    if hasattr(selected_tc, "HorizFeed"):
+                        try:
+                            selected_tc.HorizFeed = f"{speed_mm_min} mm/min"
+                        except Exception:
+                            try:
+                                selected_tc.HorizFeed.Value = speed_mm_min
+                            except Exception:
+                                pass
+                    if hasattr(selected_tc, "VertFeed"):
+                        try:
+                            selected_tc.VertFeed = f"{speed_mm_min} mm/min"
+                        except Exception:
+                            try:
+                                selected_tc.VertFeed.Value = speed_mm_min
+                            except Exception:
+                                pass
+
             try:
                 resolved_labels = [
                     str(getattr(tc, "Label", getattr(tc, "Name", "ToolController")) or "ToolController")
@@ -4108,6 +4563,164 @@ def create_pocket_cnc_job(
             except Exception:
                 pass
 
+            def _create_adaptive_fallback_ops(target_face_names):
+                adaptive_created = []
+                target_face_names = list(dict.fromkeys(list(target_face_names or [])))
+                if not target_face_names:
+                    return adaptive_created
+
+                total_adaptive_passes = len(selected_tcs)
+                requested_depth_mm = -abs(_inch_to_mm(final_depth_inch))
+                for adaptive_index, selected_tc in enumerate(selected_tcs):
+                    tc_override = _resolve_override_for_tc(selected_tc)
+                    try:
+                        stepdown_in = max(0.0, float(tc_override.get("stepdown_in", 0.0) or 0.0))
+                    except Exception:
+                        stepdown_in = 0.0
+                    stepdown_mm = _inch_to_mm(stepdown_in) if stepdown_in > 0.0 else 0.0
+                    is_finish_pass = (adaptive_index == (total_adaptive_passes - 1))
+
+                    adaptive_op = _create_adaptive_with_selected_tc(
+                        _next_name("Adaptive"),
+                        job_obj,
+                        selected_tc,
+                    )
+                    if not adaptive_op:
+                        continue
+
+                    try:
+                        if getattr(adaptive_op, "ViewObject", None):
+                            adaptive_op.ViewObject.Proxy = PathOpGuiBase.ViewProvider(
+                                adaptive_op.ViewObject,
+                                PathAdaptiveGui.Command.res,
+                            )
+                            adaptive_op.ViewObject.Visibility = True
+                            _apply_toolpath_normal_color(adaptive_op, selected_tc)
+                    except Exception:
+                        pass
+
+                    if not _has_valid_view_proxy(adaptive_op):
+                        print(
+                            f"Skipping adaptive op '{getattr(adaptive_op, 'Name', 'Adaptive')}': missing ViewObject Proxy."
+                        )
+                        _remove_doc_object(adaptive_op)
+                        continue
+
+                    try:
+                        bit_part = _bit_name_from_job_or_op(adaptive_op, job_obj)
+                        adaptive_op.Label = _unique_label(f"Adaptive_{bit_part}")
+                    except Exception:
+                        pass
+
+                    try:
+                        adaptive_op.Base = [(model_obj, list(target_face_names))]
+                    except Exception:
+                        pass
+
+                    if selected_tc and hasattr(adaptive_op, "ToolController"):
+                        try:
+                            adaptive_op.ToolController = selected_tc
+                        except Exception:
+                            pass
+
+                    for prop_name, prop_value in (("Side", "Inside"), ("OperationType", "Clearing")):
+                        if hasattr(adaptive_op, prop_name):
+                            try:
+                                setattr(adaptive_op, prop_name, prop_value)
+                            except Exception:
+                                pass
+
+                    if hasattr(adaptive_op, "KeepToolDownRatio"):
+                        try:
+                            adaptive_op.KeepToolDownRatio = 3.0 if bool(keep_tool_down) else 0.0
+                        except Exception:
+                            pass
+
+                    if hasattr(adaptive_op, "UseHelixArcs"):
+                        try:
+                            adaptive_op.UseHelixArcs = False
+                        except Exception:
+                            pass
+                    if hasattr(adaptive_op, "UseOutline"):
+                        try:
+                            adaptive_op.UseOutline = False
+                        except Exception:
+                            pass
+                    if hasattr(adaptive_op, "UseRestMachining"):
+                        try:
+                            adaptive_op.UseRestMachining = False
+                        except Exception:
+                            pass
+
+                    if stepdown_mm > 0.0 and hasattr(adaptive_op, "StepDown"):
+                        try:
+                            if hasattr(adaptive_op, "setExpression"):
+                                adaptive_op.setExpression("StepDown", None)
+                        except Exception:
+                            pass
+                        try:
+                            adaptive_op.StepDown = f"{stepdown_mm} mm"
+                        except Exception:
+                            try:
+                                adaptive_op.StepDown.Value = stepdown_mm
+                            except Exception:
+                                pass
+
+                    if hasattr(adaptive_op, "StockToLeave"):
+                        try:
+                            stock_to_leave_mm = roughing_undersize_mm if ((not is_finish_pass) and roughing_undersize_mm > 1e-6) else 0.0
+                            adaptive_op.StockToLeave = f"{stock_to_leave_mm} mm"
+                        except Exception:
+                            try:
+                                adaptive_op.StockToLeave.Value = float(stock_to_leave_mm)
+                            except Exception:
+                                pass
+
+                    for prop_name, prop_mm in (("StartDepth", 0.0), ("FinalDepth", requested_depth_mm)):
+                        if hasattr(adaptive_op, prop_name):
+                            try:
+                                if hasattr(adaptive_op, "setExpression"):
+                                    adaptive_op.setExpression(prop_name, None)
+                            except Exception:
+                                pass
+                            try:
+                                setattr(adaptive_op, prop_name, f"{prop_mm} mm")
+                            except Exception:
+                                try:
+                                    getattr(adaptive_op, prop_name).Value = float(prop_mm)
+                                except Exception:
+                                    pass
+
+                    try:
+                        doc.recompute()
+                    except Exception:
+                        pass
+
+                    _apply_toolpath_normal_color(adaptive_op, selected_tc)
+
+                    if _op_has_cut_motion(adaptive_op):
+                        adaptive_created.append(adaptive_op)
+                        try:
+                            print(
+                                f"Adaptive clearing fallback succeeded for '{getattr(adaptive_op, 'Label', getattr(adaptive_op, 'Name', 'Adaptive'))}'."
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            print(
+                                f"Adaptive clearing fallback generated no cut moves for '{getattr(adaptive_op, 'Label', getattr(adaptive_op, 'Name', 'Adaptive'))}'."
+                            )
+                        except Exception:
+                            pass
+                return adaptive_created
+
+            if multi_level_pocket:
+                try:
+                    print("Pocket Job: stepped/core-relief geometry detected; using detached region faces for stable PocketShape ops.")
+                except Exception:
+                    pass
+
             requested_final_mm = -abs(_inch_to_mm(final_depth_inch))
 
             ops_with_cut_motion = 0
@@ -4115,6 +4728,7 @@ def create_pocket_cnc_job(
             total_passes = len(selected_tcs)
             for level_index, level_info in enumerate(face_levels, start=1):
                 level_face_names = list(level_info.get("cumulative_subs", []) or level_info.get("subs", []) or [])
+                direct_level_faces = list(level_info.get("subs", []) or [])
                 if not level_face_names:
                     continue
 
@@ -4127,13 +4741,28 @@ def create_pocket_cnc_job(
 
                 try:
                     print(
-                        f"Pocket level {level_index}/{len(face_levels)}: {len(level_face_names)} cumulative face(s), target Z={level_final_mm:.4f} mm."
+                        f"Pocket level {level_index}/{len(face_levels)}: machining {len(level_face_names)} cumulative face(s) from {len(direct_level_faces)} floor face(s), target Z={level_final_mm:.4f} mm."
                     )
                 except Exception:
                     pass
 
                 for op_index, selected_tc in enumerate(selected_tcs):
+                    tc_override = _resolve_override_for_tc(selected_tc)
+                    try:
+                        stepdown_in = max(0.0, float(tc_override.get("stepdown_in", 0.0) or 0.0))
+                    except Exception:
+                        stepdown_in = 0.0
+                    stepdown_mm = _inch_to_mm(stepdown_in) if stepdown_in > 0.0 else 0.0
+
                     is_final_pass = (op_index == (total_passes - 1))
+                    region_obj, region_face_subs = _build_detached_region_obj(model_obj, level_face_names, level_index)
+                    if region_obj is None or not region_face_subs:
+                        try:
+                            print(f"Skipping pocket level {level_index}: could not build detached region faces.")
+                        except Exception:
+                            pass
+                        continue
+
                     pocket_op = _create_pocket_with_selected_tc(
                         _next_name("PocketShape"),
                         job_obj,
@@ -4157,6 +4786,13 @@ def create_pocket_cnc_job(
                     except Exception:
                         pass
 
+                    if not _has_valid_view_proxy(pocket_op):
+                        print(
+                            f"Skipping pocket op '{getattr(pocket_op, 'Name', 'PocketShape')}': missing ViewObject Proxy."
+                        )
+                        _remove_doc_object(pocket_op)
+                        continue
+
                     if selected_tc and hasattr(pocket_op, "ToolController"):
                         try:
                             pocket_op.ToolController = selected_tc
@@ -4169,7 +4805,7 @@ def create_pocket_cnc_job(
                     except Exception:
                         pass
 
-                    pocket_op.Base = [(model_obj, level_face_names)]
+                    pocket_op.Base = [(region_obj, list(region_face_subs))]
 
                     if hasattr(pocket_op, "KeepToolDown"):
                         try:
@@ -4181,6 +4817,20 @@ def create_pocket_cnc_job(
                             pocket_op.MinTravel = bool(min_travel)
                         except Exception:
                             pass
+
+                    if stepdown_mm > 0.0 and hasattr(pocket_op, "StepDown"):
+                        try:
+                            if hasattr(pocket_op, "setExpression"):
+                                pocket_op.setExpression("StepDown", None)
+                        except Exception:
+                            pass
+                        try:
+                            pocket_op.StepDown = f"{stepdown_mm} mm"
+                        except Exception:
+                            try:
+                                pocket_op.StepDown.Value = stepdown_mm
+                            except Exception:
+                                pass
 
                     try:
                         if hasattr(pocket_op, "setExpression"):
@@ -4203,7 +4853,14 @@ def create_pocket_cnc_job(
                     except Exception:
                         pass
 
-                    rest_enabled = bool(kept_pass_count > 0)
+                    rest_enabled = bool((not multi_level_pocket) and (op_index > 0) and (kept_pass_count > 0))
+                    if multi_level_pocket:
+                        try:
+                            print(
+                                f"Pocket level {level_index} pass {op_index + 1}/{total_passes} ({getattr(pocket_op, 'Label', 'PocketShape')}): Rest=False for stepped/core-relief multi-level pocketing."
+                            )
+                        except Exception:
+                            pass
                     if hasattr(pocket_op, "UseRestMachining"):
                         try:
                             pocket_op.UseRestMachining = rest_enabled
@@ -4264,6 +4921,39 @@ def create_pocket_cnc_job(
                         if name in ("G1", "G2", "G3"):
                             has_cut_motion = True
                             break
+
+                    if (not has_cut_motion) and rest_enabled:
+                        try:
+                            if hasattr(pocket_op, "UseRestMachining"):
+                                pocket_op.UseRestMachining = False
+                        except Exception:
+                            pass
+                        try:
+                            if hasattr(pocket_op, "RestMachining"):
+                                pocket_op.RestMachining = False
+                        except Exception:
+                            pass
+                        try:
+                            doc.recompute()
+                        except Exception:
+                            pass
+                        try:
+                            cmds = list(getattr(getattr(pocket_op, "Path", None), "Commands", []) or [])
+                        except Exception:
+                            cmds = []
+                        for cmd in cmds:
+                            try:
+                                name = str(getattr(cmd, "Name", "") or "").upper()
+                            except Exception:
+                                name = ""
+                            if name in ("G1", "G2", "G3"):
+                                has_cut_motion = True
+                                rest_enabled = False
+                                try:
+                                    print(f"Retried '{getattr(pocket_op, 'Label', 'PocketShape')}' with Rest=False and recovered a toolpath.")
+                                except Exception:
+                                    pass
+                                break
 
                     if has_cut_motion:
                         ops_with_cut_motion += 1
@@ -4426,15 +5116,6 @@ def create_pocket_cnc_job(
             print(f"Failed to create Pocket operation: {exc}")
             return []
 
-    def _unwrap_candidate(obj):
-        if not obj:
-            return None
-        if str(getattr(obj, "TypeId", "")) == "App::Link":
-            linked = getattr(obj, "LinkedObject", None)
-            if linked:
-                return linked
-        return obj
-
     def _is_valid_solid_candidate(obj):
         if not obj:
             return False
@@ -4517,7 +5198,7 @@ def create_pocket_cnc_job(
             return
         target_obj = candidates[0]
 
-    if not _warn_non_fillet_source(target_obj, "Pocket Job"):
+    if (not bool(skip_fillet_warning)) and (not _warn_non_fillet_source(target_obj, "Pocket Job")):
         return
 
     effective_template_path = scripted_template_path
@@ -4577,103 +5258,9 @@ def create_pocket_cnc_job(
         except Exception:
             pocket_skip_large_minutes_threshold = 3.0
 
-    def _template_files():
-        files = []
-        try:
-            for path in PathPreferences.searchPaths():
-                files.extend(glob.glob(os.path.join(path, "job_*.json")))
-        except Exception:
-            return []
-
-        seen = set()
-        out = []
-        for f in files:
-            norm = os.path.normpath(f)
-            if norm in seen:
-                continue
-            seen.add(norm)
-            out.append(norm)
-        return out
-
-    templates = _template_files()
-
-    def _template_display_name(path):
-        base = os.path.splitext(os.path.basename(path))[0]
-        if base.lower().startswith("job_"):
-            return base[4:]
-        return base
-
-    def _template_tool_controller_options(template_path):
-        def _to_mm(value):
-            try:
-                return float(getattr(value, "Value", value))
-            except Exception:
-                pass
-            try:
-                return float(App.Units.Quantity(str(value)).Value)
-            except Exception:
-                pass
-            try:
-                return float(value)
-            except Exception:
-                return 0.0
-
-        path = str(template_path or "").strip()
-        if not path or not os.path.exists(path):
-            return []
-
-        try:
-            with open(path, "rb") as fp:
-                attrs = json.load(fp)
-        except Exception:
-            return []
-
-        raw_tcs = attrs.get("ToolController") or []
-        if not isinstance(raw_tcs, list):
-            return []
-
-        options = []
-        for idx, tc in enumerate(raw_tcs, start=1):
-            if not isinstance(tc, dict):
-                continue
-            name = str(tc.get("name", "") or "").strip() or f"TC{idx}"
-            label = str(tc.get("label", "") or "").strip() or name
-
-            tool_data = tc.get("tool", {}) if isinstance(tc.get("tool", {}), dict) else {}
-            tool_label = str(
-                tool_data.get("name", "")
-                or tool_data.get("label", "")
-                or tc.get("toolname", "")
-                or tc.get("tool", "")
-                or ""
-            ).strip()
-            diameter_mm = _to_mm(
-                tool_data.get("diameter", tool_data.get("Diameter", tc.get("diameter", tc.get("Diameter", 0.0))))
-            )
-
-            display = label
-            if diameter_mm > 0.0:
-                display = f"{display} ({diameter_mm / 25.4:.3f} in)"
-            elif tool_label:
-                display = f"{display} ({tool_label})"
-
-            options.append(
-                {
-                    "name": name,
-                    "label": label,
-                    "tool_label": tool_label,
-                    "diameter_mm": diameter_mm,
-                    "display": display,
-                }
-            )
-
-        options.sort(
-            key=lambda item: (
-                -(float(item.get("diameter_mm", 0.0) or 0.0)),
-                str(item.get("display", "")).lower(),
-            )
-        )
-        return options
+    templates = _collect_job_template_files(PathPreferences.searchPaths)
+    _template_display_name = _job_template_display_name
+    _template_tool_controller_options = _job_template_tool_controller_options
 
     if show_dialog and QtGui is not None and Gui is not None:
         default_template = ""
@@ -4810,6 +5397,19 @@ def create_pocket_cnc_job(
                 except Exception:
                     self._selected_bits_by_template = {}
 
+                self._bit_settings_by_template = {}
+                try:
+                    if pocket_prefs is not None:
+                        raw_settings_map = str(
+                            pocket_prefs.GetString("selected_bit_settings_by_template_pocket", "") or ""
+                        ).strip()
+                        if raw_settings_map:
+                            loaded_settings_map = json.loads(raw_settings_map)
+                            if isinstance(loaded_settings_map, dict):
+                                self._bit_settings_by_template = loaded_settings_map
+                except Exception:
+                    self._bit_settings_by_template = {}
+
                 def _template_key(path_text):
                     try:
                         text = str(path_text or "").strip()
@@ -4830,6 +5430,56 @@ def create_pocket_cnc_job(
                             pass
                     return list(self._fallback_bit_selections)
 
+                def _ensure_settings_for_template(path_text, tool_options):
+                    key = _template_key(path_text)
+                    if key not in self._bit_settings_by_template or not isinstance(self._bit_settings_by_template.get(key), dict):
+                        self._bit_settings_by_template[key] = {}
+                    settings = self._bit_settings_by_template.get(key, {})
+
+                    changed = False
+                    for option in list(tool_options or []):
+                        name = str(option.get("name", "") or "").strip()
+                        if not name:
+                            continue
+                        if name not in settings or not isinstance(settings.get(name), dict):
+                            settings[name] = {}
+                        row = settings.get(name, {})
+
+                        try:
+                            if float(row.get("stepdown_in", 0.0) or 0.0) <= 0.0:
+                                row["stepdown_in"] = max(0.0, float(option.get("default_stepdown_in", 0.0) or 0.0))
+                                changed = True
+                        except Exception:
+                            row["stepdown_in"] = max(0.0, float(option.get("default_stepdown_in", 0.0) or 0.0))
+                            changed = True
+
+                        try:
+                            speed_existing = float(row.get("speed_ipm", 0.0) or 0.0)
+                        except Exception:
+                            speed_existing = 0.0
+                        if speed_existing <= 0.0:
+                            try:
+                                speed_default = max(0.0, float(option.get("default_speed_ipm", 0.0) or 0.0))
+                            except Exception:
+                                speed_default = 0.0
+                            if speed_default > 0.0:
+                                row["speed_ipm"] = speed_default
+                                changed = True
+
+                        settings[name] = row
+
+                    self._bit_settings_by_template[key] = settings
+                    if changed:
+                        try:
+                            if pocket_prefs is not None:
+                                pocket_prefs.SetString(
+                                    "selected_bit_settings_by_template_pocket",
+                                    json.dumps(self._bit_settings_by_template),
+                                )
+                        except Exception:
+                            pass
+                    return key, settings
+
                 def _clear_bits_ui():
                     try:
                         while self._bit_layout.count() > 0:
@@ -4848,6 +5498,8 @@ def create_pocket_cnc_job(
                     if not tool_options:
                         self._bit_layout.addWidget(QtGui.QLabel("No bits found in selected CAM template."))
                         return
+
+                    key, settings_for_template = _ensure_settings_for_template(template_path, tool_options)
 
                     self._persisted_bit_selections = _persisted_for_template(template_path)
 
@@ -4874,12 +5526,50 @@ def create_pocket_cnc_job(
                         cb = QtGui.QCheckBox(str(option.get("display", tc_label or tc_name) or tc_name))
                         checked = _is_persisted(option)
                         cb.setChecked(bool(checked))
+
+                        bit_name = str(option.get("name", "") or "").strip()
+                        bit_settings = dict(settings_for_template.get(bit_name, {}) or {})
+
+                        step_spin = QtGui.QDoubleSpinBox()
+                        step_spin.setDecimals(4)
+                        step_spin.setRange(0.0, 1.0)
+                        step_spin.setSingleStep(0.005)
+                        step_spin.setToolTip("Step Down (in), 0 = use template default for this bit")
+                        try:
+                            step_spin.setValue(max(0.0, float(bit_settings.get("stepdown_in", option.get("default_stepdown_in", 0.0)) or 0.0)))
+                        except Exception:
+                            step_spin.setValue(max(0.0, float(option.get("default_stepdown_in", 0.0) or 0.0)))
+
+                        speed_spin = QtGui.QDoubleSpinBox()
+                        speed_spin.setDecimals(2)
+                        speed_spin.setRange(0.0, 1000.0)
+                        speed_spin.setSingleStep(1.0)
+                        speed_spin.setToolTip("Speed (ipm), 0 = use template default for this bit")
+                        try:
+                            speed_spin.setValue(max(0.0, float(bit_settings.get("speed_ipm", option.get("default_speed_ipm", 0.0)) or 0.0)))
+                        except Exception:
+                            speed_spin.setValue(max(0.0, float(option.get("default_speed_ipm", 0.0) or 0.0)))
+
+                        row_widget = QtGui.QWidget()
+                        row_layout = QtGui.QHBoxLayout(row_widget)
+                        row_layout.setContentsMargins(0, 0, 0, 0)
+                        row_layout.addWidget(cb, 1)
+                        row_layout.addWidget(QtGui.QLabel("Step:"))
+                        row_layout.addWidget(step_spin)
+                        row_layout.addWidget(QtGui.QLabel("IPM:"))
+                        row_layout.addWidget(speed_spin)
+
                         try:
                             cb.toggled.connect(self._mark_dirty)
                         except Exception:
                             pass
-                        self._bit_layout.addWidget(cb)
-                        self.tool_checkboxes.append((option, cb))
+                        try:
+                            step_spin.valueChanged.connect(self._mark_dirty)
+                            speed_spin.valueChanged.connect(self._mark_dirty)
+                        except Exception:
+                            pass
+                        self._bit_layout.addWidget(row_widget)
+                        self.tool_checkboxes.append((option, cb, step_spin, speed_spin))
 
                 self._refresh_bits_from_template = _refresh_bits_from_template
 
@@ -4962,14 +5652,42 @@ def create_pocket_cnc_job(
                         sorted(
                             [
                                 str(option.get("name", "") or "")
-                                for option, cb in self.tool_checkboxes
+                                for option, cb, _, _ in self.tool_checkboxes
                                 if cb.isChecked() and str(option.get("name", "") or "")
                             ]
                         )
                     )
                 except Exception:
                     selected_bits = tuple()
-                return (solid_name, template_path, roughing, glue, final_depth, skip_large_bit, skip_large_minutes, keep_tool_down, min_travel, selected_bits)
+                try:
+                    selected_bit_settings = tuple(
+                        sorted(
+                            [
+                                (
+                                    str(option.get("name", "") or ""),
+                                    round(float(step_spin.value()), 6),
+                                    round(float(speed_spin.value()), 6),
+                                )
+                                for option, cb, step_spin, speed_spin in self.tool_checkboxes
+                                if cb.isChecked() and str(option.get("name", "") or "")
+                            ]
+                        )
+                    )
+                except Exception:
+                    selected_bit_settings = tuple()
+                return (
+                    solid_name,
+                    template_path,
+                    roughing,
+                    glue,
+                    final_depth,
+                    skip_large_bit,
+                    skip_large_minutes,
+                    keep_tool_down,
+                    min_travel,
+                    selected_bits,
+                    selected_bit_settings,
+                )
 
             def _run_creation(self, close_after=True):
                 current_signature = self._current_signature()
@@ -5022,20 +5740,80 @@ def create_pocket_cnc_job(
 
                 selected_tool_names = None
                 try:
+                    def _effective_tool_value(option, ui_value, default_key):
+                        try:
+                            parsed_value = max(0.0, float(ui_value))
+                        except Exception:
+                            parsed_value = 0.0
+                        if parsed_value > 0.0:
+                            return parsed_value
+                        try:
+                            return max(0.0, float(option.get(default_key, 0.0) or 0.0))
+                        except Exception:
+                            return 0.0
+
                     selected_tool_names = [
                         {
                             "name": str(option.get("name", "") or "").strip(),
                             "label": str(option.get("label", "") or "").strip(),
                             "tool_label": str(option.get("tool_label", "") or "").strip(),
                             "diameter_mm": float(option.get("diameter_mm", 0.0) or 0.0),
+                            "stepdown_in": _effective_tool_value(
+                                option,
+                                step_spin.value() if step_spin is not None else 0.0,
+                                "default_stepdown_in",
+                            ),
+                            "speed_ipm": _effective_tool_value(
+                                option,
+                                speed_spin.value() if speed_spin is not None else 0.0,
+                                "default_speed_ipm",
+                            ),
                         }
-                        for option, cb in self.tool_checkboxes
+                        for option, cb, step_spin, speed_spin in self.tool_checkboxes
                         if cb.isChecked()
                     ]
                 except Exception:
                     selected_tool_names = None
                 try:
                     if pocket_prefs is not None and isinstance(selected_tool_names, list):
+                        try:
+                            selected_template_key = ""
+                            try:
+                                selected_template_key = os.path.normpath(str(selected_template or "").strip()) if str(selected_template or "").strip() else ""
+                            except Exception:
+                                selected_template_key = str(selected_template or "")
+                            if selected_template_key:
+                                updated_settings = dict(self._bit_settings_by_template.get(selected_template_key, {}) or {})
+                                for option, _, step_spin, speed_spin in self.tool_checkboxes:
+                                    bit_name = str(option.get("name", "") or "").strip()
+                                    if not bit_name:
+                                        continue
+                                    try:
+                                        step_val = max(0.0, float(step_spin.value())) if step_spin is not None else 0.0
+                                    except Exception:
+                                        step_val = 0.0
+                                    if step_val <= 0.0:
+                                        try:
+                                            step_val = max(0.0, float(option.get("default_stepdown_in", 0.0) or 0.0))
+                                        except Exception:
+                                            step_val = 0.0
+                                    try:
+                                        speed_val = max(0.0, float(speed_spin.value())) if speed_spin is not None else 0.0
+                                    except Exception:
+                                        speed_val = 0.0
+                                    if speed_val <= 0.0:
+                                        try:
+                                            speed_val = max(0.0, float(option.get("default_speed_ipm", 0.0) or 0.0))
+                                        except Exception:
+                                            speed_val = 0.0
+                                    updated_settings[bit_name] = {"stepdown_in": step_val, "speed_ipm": speed_val}
+                                self._bit_settings_by_template[selected_template_key] = updated_settings
+                                pocket_prefs.SetString(
+                                    "selected_bit_settings_by_template_pocket",
+                                    json.dumps(self._bit_settings_by_template),
+                                )
+                        except Exception:
+                            pass
                         pocket_prefs.SetString("selected_tool_names", json.dumps(selected_tool_names))
                         selected_template_key = ""
                         try:
@@ -5062,6 +5840,7 @@ def create_pocket_cnc_job(
                         pocket_min_travel_override=selected_min_travel,
                         pocket_skip_large_if_under_minutes_override=selected_skip_large_bit,
                         pocket_skip_large_minutes_threshold_override=selected_skip_large_minutes,
+                        skip_fillet_warning=bool(skip_fillet_warning),
                     )
                     self._last_run_signature = current_signature
                 finally:
@@ -5099,48 +5878,9 @@ def create_pocket_cnc_job(
         print(f"Template not found: {effective_template_path}")
         return
 
-    def _as_mm(value):
-        try:
-            return float(getattr(value, "Value", value))
-        except Exception:
-            return 0.0
-
-    def _job_tool_controllers_sorted_largest_first(job_obj):
-        try:
-            tools_group = list(getattr(getattr(job_obj, "Tools", None), "Group", None) or [])
-        except Exception:
-            tools_group = []
-
-        with_diameter = []
-        without_diameter = []
-        for tc in tools_group:
-            try:
-                tool = getattr(tc, "Tool", None)
-                dmm = _as_mm(getattr(tool, "Diameter", 0.0))
-            except Exception:
-                dmm = 0.0
-            if dmm > 0:
-                with_diameter.append((dmm, tc))
-            else:
-                without_diameter.append(tc)
-
-        with_diameter.sort(key=lambda item: item[0], reverse=True)
-        ordered = [tc for _, tc in with_diameter]
-        ordered.extend(without_diameter)
-        return ordered
-
-    def _selected_tool_labels_for_job(job_obj, selected_names):
-        selected_set = {str(name) for name in (selected_names or []) if str(name).strip()}
-        labels = []
-        try:
-            for tc in _job_tool_controllers_sorted_largest_first(job_obj):
-                tc_name = str(getattr(tc, "Name", "") or "")
-                if tc_name and tc_name in selected_set:
-                    tc_label = str(getattr(tc, "Label", "") or "").strip()
-                    labels.append(tc_label or tc_name)
-        except Exception:
-            pass
-        return labels
+    _as_mm = _as_mm_value
+    _job_tool_controllers_sorted_largest_first = _sorted_job_tool_controllers_largest_first
+    _selected_tool_labels_for_job = _selected_tool_labels_for_job_names
 
     def _select_tool_names_for_pocket(job_obj, selected_override=None):
         ordered_tcs = _job_tool_controllers_sorted_largest_first(job_obj)
@@ -5395,9 +6135,25 @@ def create_pocket_cnc_job(
             pass
         return fallback
 
-    pocket_job_model, created_items = _create_pocket_job_model_from_inlay(target_obj)
-    if not pocket_job_model:
-        return
+    use_existing_pocket_model = False
+    try:
+        use_existing_pocket_model = bool(getattr(target_obj, "ButlerIsPocketModel", False))
+    except Exception:
+        use_existing_pocket_model = False
+    if not use_existing_pocket_model:
+        try:
+            workflow_tag = str(getattr(target_obj, "ButlerCuesWorkflow", "") or "").strip().lower()
+            use_existing_pocket_model = (workflow_tag == "pocket model")
+        except Exception:
+            pass
+
+    if use_existing_pocket_model:
+        pocket_job_model = target_obj
+        created_items = []
+    else:
+        pocket_job_model, created_items = _create_pocket_job_model_from_inlay(target_obj)
+        if not pocket_job_model:
+            return
 
     job_models = [pocket_job_model]
 
@@ -5412,7 +6168,39 @@ def create_pocket_cnc_job(
         except Exception:
             pass
 
+    tx_open = False
+    tx_done = False
+
+    def _commit_pocket_tx():
+        if _BUTLER_DISABLE_CAM_UNDO:
+            return
+        nonlocal tx_open, tx_done
+        if not tx_open or tx_done:
+            return
+        try:
+            if hasattr(doc, "commitTransaction"):
+                doc.commitTransaction()
+                tx_done = True
+        except Exception:
+            pass
+
+    def _abort_pocket_tx():
+        if _BUTLER_DISABLE_CAM_UNDO:
+            return
+        nonlocal tx_open, tx_done
+        if not tx_open or tx_done:
+            return
+        try:
+            if hasattr(doc, "abortTransaction"):
+                doc.abortTransaction()
+            tx_done = True
+        except Exception:
+            pass
+
     try:
+        if (not _BUTLER_DISABLE_CAM_UNDO) and hasattr(doc, "openTransaction"):
+            doc.openTransaction("Create Pocket CAM Job")
+            tx_open = True
         active_view = None
         previous_body = None
         previous_part = None
@@ -5458,6 +6246,7 @@ def create_pocket_cnc_job(
             requested_tool_items = list(selected_tool_names_override or [])
             if not requested_tool_items:
                 print("Pocket Job aborted: no bits were checked.")
+                _abort_pocket_tx()
                 return
             try:
                 selected_labels = []
@@ -5476,6 +6265,7 @@ def create_pocket_cnc_job(
             selected_tool_names = _select_tool_names_for_pocket(job, requested_tool_items)
             if not selected_tool_names:
                 print("Pocket Job aborted: checked bits could not be resolved to created job tool controllers.")
+                _abort_pocket_tx()
                 return
         else:
             selected_tool_names = _select_tool_names_for_pocket(job, None)
@@ -5493,6 +6283,7 @@ def create_pocket_cnc_job(
             glue_oversize_in,
             pocket_final_depth_in,
             selected_tool_names,
+            selected_tool_overrides=selected_tool_names_override,
             keep_tool_down=bool(pocket_keep_tool_down),
             min_travel=bool(pocket_min_travel),
             skip_large_if_under_minutes=bool(pocket_skip_large_if_under_minutes),
@@ -5550,6 +6341,7 @@ def create_pocket_cnc_job(
                         glue_oversize_in,
                         pocket_final_depth_in,
                         selected_tool_names,
+                        selected_tool_overrides=selected_tool_names_override,
                         keep_tool_down=bool(pocket_keep_tool_down),
                         min_travel=bool(pocket_min_travel),
                         skip_large_if_under_minutes=bool(pocket_skip_large_if_under_minutes),
@@ -5588,6 +6380,7 @@ def create_pocket_cnc_job(
             except Exception:
                 pass
             doc.recompute()
+            _commit_pocket_tx()
             _record_undo_cleanup_bundle()
             return
 
@@ -5625,6 +6418,7 @@ def create_pocket_cnc_job(
             print(traceback.format_exc())
         except Exception:
             pass
+        _abort_pocket_tx()
         return
 
     try:
@@ -5649,6 +6443,7 @@ def create_pocket_cnc_job(
     except Exception:
         pass
 
+    _commit_pocket_tx()
     _record_undo_cleanup_bundle()
 
 # # Make sure something is selected

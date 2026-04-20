@@ -12,6 +12,7 @@ except Exception:
     QtCore = None
 
 def fillet_for_cnc(
+    target=None,
     noise=None,
     fillet_radius_inch=None,
     final_solid_name=None,
@@ -217,7 +218,7 @@ def fillet_for_cnc(
                 self.full_coverage_check = QtGui.QCheckBox("Require full miter coverage (fail otherwise)")
                 self.full_coverage_check.setChecked(bool(require_full_coverage))
 
-                note = QtGui.QLabel("Fillet targets Z-axis edges only.")
+                note = QtGui.QLabel("Fillet targets seam edges parallel to the part's extrusion axis.")
 
                 layout.addRow("Final solid name", self.final_name_edit)
                 layout.addRow("Fillet radius", self.radius_spin)
@@ -321,6 +322,47 @@ def fillet_for_cnc(
         print(f"Part module unavailable: {exc}")
         return
 
+    def _normalized_axis(vec_obj, fallback=None):
+        fallback_vec = App.Vector(fallback or App.Vector(0, 0, 1))
+        try:
+            axis = App.Vector(vec_obj)
+        except Exception:
+            try:
+                axis = App.Vector(
+                    float(getattr(vec_obj, "x", 0.0)),
+                    float(getattr(vec_obj, "y", 0.0)),
+                    float(getattr(vec_obj, "z", 0.0)),
+                )
+            except Exception:
+                axis = App.Vector(fallback_vec)
+        if float(getattr(axis, "Length", 0.0) or 0.0) <= 1e-9:
+            axis = App.Vector(fallback_vec)
+        try:
+            axis.normalize()
+        except Exception:
+            axis = App.Vector(fallback_vec)
+            try:
+                axis.normalize()
+            except Exception:
+                return App.Vector(0, 0, 1)
+        try:
+            if axis.z < 0.0 or (abs(axis.z) < 1e-9 and axis.y < 0.0) or (abs(axis.z) < 1e-9 and abs(axis.y) < 1e-9 and axis.x < 0.0):
+                axis = App.Vector(-axis.x, -axis.y, -axis.z)
+        except Exception:
+            pass
+        return axis
+
+    def _safe_face_normal(face_obj):
+        try:
+            com = face_obj.CenterOfMass
+            u, v = face_obj.Surface.parameter(com)
+            n = face_obj.normalAt(u, v)
+            if float(getattr(n, "Length", 0.0) or 0.0) <= 1e-9:
+                return None
+            return _normalized_axis(n)
+        except Exception:
+            return None
+
     def _axis_vector_for_bbox(shape_obj):
         bbox = shape_obj.BoundBox
         axes = [
@@ -332,9 +374,10 @@ def fillet_for_cnc(
         if not axes:
             return App.Vector(0, 0, 1)
         axes.sort(key=lambda item: item[0])
-        return axes[0][1]
+        return _normalized_axis(axes[0][1])
 
     def _edges_parallel_to_axis(shape_obj, axis, tol=1e-4):
+        axis = _normalized_axis(axis)
         matches = []
         for edge in shape_obj.Edges:
             curve = getattr(edge, "Curve", None)
@@ -426,13 +469,13 @@ def fillet_for_cnc(
         }
 
     def _bit_fit_unfit_z_edges(shape_obj, bit_radius_mm, target_axis=None, edge_candidates=None):
+        axis_vec = _normalized_axis(target_axis if target_axis is not None else _preferred_axis_for_shape(shape_obj))
         if edge_candidates is not None:
             try:
                 z_edges = list(edge_candidates or [])
             except Exception:
                 z_edges = []
         else:
-            axis_vec = target_axis if target_axis is not None else App.Vector(0, 0, 1)
             try:
                 z_edges = list(_edges_parallel_to_axis(shape_obj, axis_vec) or [])
             except Exception:
@@ -452,7 +495,7 @@ def fillet_for_cnc(
                 com = face_obj.CenterOfMass
                 u, v = face_obj.Surface.parameter(com)
                 n = face_obj.normalAt(u, v)
-                return bool(n.isParallel(App.Vector(0, 0, 1), 1e-4))
+                return bool(n.isParallel(axis_vec, 1e-4))
             except Exception:
                 return False
 
@@ -510,7 +553,7 @@ def fillet_for_cnc(
                 n = face_obj.normalAt(u, v)
                 if float(getattr(n, "Length", 0.0) or 0.0) <= 1e-9:
                     return None
-                return n
+                return _normalized_axis(n)
             except Exception:
                 return None
 
@@ -519,7 +562,7 @@ def fillet_for_cnc(
             if n is None:
                 return False
             try:
-                return not bool(n.isParallel(App.Vector(0, 0, 1), 1e-4))
+                return not bool(n.isParallel(axis_vec, 1e-4))
             except Exception:
                 return False
 
@@ -699,10 +742,20 @@ def fillet_for_cnc(
 
         return issue_group
 
-    selection = Gui.Selection.getSelection()
+    selection = []
+    if target is not None:
+        if isinstance(target, (list, tuple)):
+            selection = [obj for obj in target if obj is not None]
+        else:
+            selection = [target]
+    elif Gui is not None:
+        try:
+            selection = list(Gui.Selection.getSelection() or [])
+        except Exception:
+            selection = []
     if not selection:
         print("No object selected. Please select an object.")
-        return
+        return None
 
     selected_roots = list(selection or [])
 
@@ -807,47 +860,115 @@ def fillet_for_cnc(
     # Convert fillet radius from inches to millimeters
     fillet_radius = fillet_radius_inch * 25.4
 
-    axis_candidates = [App.Vector(0, 0, 1)]
-
-    unique_axes = []
-    for axis in axis_candidates:
-        if not any(axis.isEqual(existing, 1e-7) for existing in unique_axes):
-            unique_axes.append(axis)
-
     def _axis_key(vec_obj):
-        try:
-            vec = App.Vector(float(vec_obj.x), float(vec_obj.y), float(vec_obj.z))
-        except Exception:
+        vec = _normalized_axis(vec_obj)
+        return (round(float(vec.x), 4), round(float(vec.y), 4), round(float(vec.z), 4))
+
+    def _preferred_axis_from_object(obj):
+        if not obj:
+            return None
+        for prop_name in ("PreferredFilletAxis", "FilletPreferredAxis"):
+            if not hasattr(obj, prop_name):
+                continue
             try:
-                vec = App.Vector(vec_obj)
+                axis = _normalized_axis(getattr(obj, prop_name))
+                if float(getattr(axis, "Length", 0.0) or 0.0) > 1e-9:
+                    return axis
             except Exception:
-                vec = App.Vector(0, 0, 1)
+                continue
+        return None
+
+    def _candidate_axes_for_shape(shape_obj, source_obj=None):
+        candidates = []
+        seen = set()
+
+        def _add(axis_obj):
+            axis_norm = _normalized_axis(axis_obj)
+            key = _axis_key(axis_norm)
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(axis_norm)
+
+        explicit_axis = _preferred_axis_from_object(source_obj)
+        if explicit_axis is not None:
+            _add(explicit_axis)
+
+        _add(_axis_vector_for_bbox(shape_obj))
+
         try:
-            if vec.z < 0.0 or (abs(vec.z) < 1e-9 and vec.y < 0.0) or (abs(vec.z) < 1e-9 and abs(vec.y) < 1e-9 and vec.x < 0.0):
-                vec = App.Vector(-vec.x, -vec.y, -vec.z)
+            planar_faces = []
+            for face in list(getattr(shape_obj, "Faces", []) or []):
+                surf = getattr(face, "Surface", None)
+                if getattr(surf, "TypeId", "") != "Part::GeomPlane":
+                    continue
+                normal = _safe_face_normal(face)
+                if normal is None:
+                    continue
+                planar_faces.append((float(getattr(face, "Area", 0.0) or 0.0), normal))
+            planar_faces.sort(key=lambda item: item[0], reverse=True)
+            for _area, normal in planar_faces[:8]:
+                _add(normal)
         except Exception:
             pass
-        return (round(float(vec.x), 3), round(float(vec.y), 3), round(float(vec.z), 3))
 
-    def _candidate_axes_for_shape(shape_obj):
-        return [App.Vector(0, 0, 1)]
+        try:
+            direction_scores = {}
+            direction_axes = {}
+            for edge in list(getattr(shape_obj, "Edges", []) or []):
+                curve = getattr(edge, "Curve", None)
+                if getattr(curve, "TypeId", "") != "Part::GeomLine":
+                    continue
+                try:
+                    direction = curve.Direction
+                except Exception:
+                    verts = list(getattr(edge, "Vertexes", []) or [])
+                    if len(verts) != 2:
+                        continue
+                    direction = verts[1].Point.sub(verts[0].Point)
+                axis_norm = _normalized_axis(direction)
+                key = _axis_key(axis_norm)
+                direction_axes[key] = axis_norm
+                direction_scores[key] = direction_scores.get(key, 0.0) + float(getattr(edge, "Length", 0.0) or 0.0)
+            for key, _score in sorted(direction_scores.items(), key=lambda item: item[1], reverse=True):
+                _add(direction_axes[key])
+        except Exception:
+            pass
 
-    def _preferred_axis_for_shape(shape_obj):
-        candidate_axes = [App.Vector(0, 0, 1)]
+        _add(App.Vector(0, 0, 1))
+        _add(App.Vector(1, 0, 0))
+        _add(App.Vector(0, 1, 0))
+        return candidates or [App.Vector(0, 0, 1)]
+
+    def _preferred_axis_for_shape(shape_obj, source_obj=None):
+        explicit_axis = _preferred_axis_from_object(source_obj)
+        if explicit_axis is not None:
+            return explicit_axis
+        bbox_axis = _axis_vector_for_bbox(shape_obj)
         ranked = []
-        for axis in candidate_axes:
+        for axis in _candidate_axes_for_shape(shape_obj, source_obj=source_obj):
             try:
-                count = len(_edges_parallel_to_axis(shape_obj, axis))
+                axis_edges = list(_edges_parallel_to_axis(shape_obj, axis) or [])
             except Exception:
-                count = 0
-            ranked.append((int(count), axis))
-        ranked.sort(key=lambda item: item[0], reverse=True)
+                axis_edges = []
+            total_length = sum(float(getattr(edge, "Length", 0.0) or 0.0) for edge in axis_edges)
+            try:
+                alignment = abs(_normalized_axis(axis).dot(_normalized_axis(bbox_axis)))
+            except Exception:
+                alignment = 0.0
+            ranked.append((len(axis_edges), total_length, alignment, axis))
+        ranked.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
         if ranked and ranked[0][0] > 0:
-            return ranked[0][1]
-        return App.Vector(0, 0, 1)
+            return ranked[0][3]
+        return bbox_axis
 
-    def _axis_order_for_shape(shape_obj):
-        return [App.Vector(0, 0, 1)]
+    def _axis_order_for_shape(shape_obj, source_obj=None):
+        preferred = _preferred_axis_for_shape(shape_obj, source_obj=source_obj)
+        ordered = [preferred]
+        for axis in _candidate_axes_for_shape(shape_obj, source_obj=source_obj):
+            if not any(_axis_key(axis) == _axis_key(existing) for existing in ordered):
+                ordered.append(axis)
+        return ordered
 
     def _collect_target_edges(shape_obj, axis_order):
         target_edges_local = []
@@ -916,9 +1037,10 @@ def fillet_for_cnc(
         dedup.sort(reverse=True)
         return dedup
 
-    def _refine_z_edges_with_radii(shape_obj, radii_mm):
+    def _refine_z_edges_with_radii(shape_obj, radii_mm, target_axis=None):
         working = shape_obj
         updates = 0
+        axis_ref = _normalized_axis(target_axis if target_axis is not None else _preferred_axis_for_shape(shape_obj))
         radius_list = []
         try:
             radius_list = [float(value) for value in list(radii_mm or []) if float(value) > 0.0]
@@ -931,7 +1053,7 @@ def fillet_for_cnc(
             for _ in range(4):
                 round_updates = 0
                 try:
-                    edges_now = _edges_parallel_to_axis(working, App.Vector(0, 0, 1))
+                    edges_now = _edges_parallel_to_axis(working, axis_ref)
                 except Exception:
                     edges_now = []
                 if not edges_now:
@@ -973,8 +1095,15 @@ def fillet_for_cnc(
         successful_radius = None
         used_axis = None
         source_radius_attempts = _radius_attempts_for_shape(source_shape, fillet_radius)
-        axis_order = _axis_order_for_shape(source_shape)
+        axis_order = _axis_order_for_shape(source_shape, source_obj=source_obj)
         preferred_axis = axis_order[0] if axis_order else App.Vector(0, 0, 1)
+        try:
+            print(
+                f"Fillet axis for '{source_label}': "
+                f"({float(preferred_axis.x):.3f}, {float(preferred_axis.y):.3f}, {float(preferred_axis.z):.3f})"
+            )
+        except Exception:
+            pass
 
         target_edges = _collect_target_edges(source_shape, axis_order)
 
@@ -998,7 +1127,7 @@ def fillet_for_cnc(
                     pass
             continue
 
-        unfit_z_edges = list(_bit_fit_unfit_z_edges(source_shape, fillet_radius, edge_candidates=target_edges) or [])
+        unfit_z_edges = list(_bit_fit_unfit_z_edges(source_shape, fillet_radius, target_axis=preferred_axis, edge_candidates=target_edges) or [])
         bitfit_unfit_total += int(len(unfit_z_edges))
         if unfit_z_edges:
             print(
@@ -1080,7 +1209,7 @@ def fillet_for_cnc(
         if (not fillet) and (not require_full_coverage):
             initial_z_edges = []
             try:
-                initial_z_edges = _edges_parallel_to_axis(source_shape, App.Vector(0, 0, 1))
+                initial_z_edges = _edges_parallel_to_axis(source_shape, preferred_axis)
             except Exception:
                 initial_z_edges = []
 
@@ -1098,7 +1227,7 @@ def fillet_for_cnc(
                         round_progress = 0
                         current_z_edges = []
                         try:
-                            current_z_edges = _edges_parallel_to_axis(working, App.Vector(0, 0, 1))
+                            current_z_edges = _edges_parallel_to_axis(working, preferred_axis)
                         except Exception:
                             current_z_edges = []
                         if not current_z_edges:
@@ -1125,11 +1254,11 @@ def fillet_for_cnc(
                 if best_shape is not None and best_success_count > 0:
                     fillet = best_shape
                     successful_radius = best_radius
-                    used_axis = App.Vector(0, 0, 1)
+                    used_axis = preferred_axis
                     try:
                         total_z_edges = len(initial_z_edges)
                         print(
-                            f"Z-edge fillet coverage for '{source_label}': "
+                            f"Axis-edge fillet coverage for '{source_label}': "
                             f"{best_success_count}/{total_z_edges} edge updates at radius {float(best_radius) / 25.4:.4f} in."
                         )
                     except Exception:
@@ -1177,9 +1306,9 @@ def fillet_for_cnc(
                 pass
             continue
 
-        post_axis_order = _axis_order_for_shape(fillet)
+        post_axis_order = _axis_order_for_shape(fillet, source_obj=source_obj)
         post_target_edges = _collect_target_edges(fillet, post_axis_order)
-        remaining_unfit = list(_bit_fit_unfit_z_edges(fillet, fillet_radius, edge_candidates=post_target_edges) or [])
+        remaining_unfit = list(_bit_fit_unfit_z_edges(fillet, fillet_radius, target_axis=used_axis or preferred_axis, edge_candidates=post_target_edges) or [])
         if remaining_unfit:
             bitfit_issue_infos.append((source_label, fillet, list(remaining_unfit), len(unfit_z_edges)))
             if source_label not in failed_labels:
@@ -1225,6 +1354,7 @@ def fillet_for_cnc(
                 refined_shape, refine_updates = _refine_z_edges_with_radii(
                     fillet,
                     extra_radii,
+                    target_axis=used_axis or preferred_axis,
                 )
                 if refine_updates > 0 and _is_valid_shape(refined_shape):
                     filleted_shapes[-1] = refined_shape
@@ -1291,7 +1421,7 @@ def fillet_for_cnc(
 
     if not filleted_shapes:
         print("Failed to create fillet: no valid edge/radius combination found.")
-        return
+        return None
 
     def _normalize_shapes_for_compound(shape_list):
         normalized = []
@@ -1426,6 +1556,13 @@ def fillet_for_cnc(
         "FilletForCNC",
         "Human-readable summary of fillet settings used for this inlay",
     )
+    _ensure_property(
+        final_obj,
+        "App::PropertyVector",
+        "PreferredFilletAxis",
+        "FilletForCNC",
+        "Preferred seam axis for CNC fillet detection",
+    )
 
     try:
         final_obj.FilletRadiusInch = float(fillet_radius_inch)
@@ -1450,6 +1587,12 @@ def fillet_for_cnc(
     except Exception:
         pass
     try:
+        preferred_axis_value = _preferred_axis_from_object(source_entries[0][0]) if source_entries else None
+        if preferred_axis_value is not None:
+            final_obj.PreferredFilletAxis = preferred_axis_value
+    except Exception:
+        pass
+    try:
         final_obj.FilletSettingsSummary = (
             f"radius={float(fillet_radius_inch):.4f} in; "
             f"preserve_unfilleted={'yes' if bool(preserve_unfilleted) else 'no'}; "
@@ -1461,7 +1604,7 @@ def fillet_for_cnc(
 
     # Do not alter tree visibility of source objects.
 
-    axis_name = "Z"
+    axis_name = "part extrusion axis"
     if sample_radius is not None:
         print(
             f"Fillet created for CNC on {successful_count}/{len(source_entries)} solid(s) "
@@ -1472,7 +1615,7 @@ def fillet_for_cnc(
     if no_fillet_needed_count > 0:
         print(
             f"No fillet needed for {no_fillet_needed_count} solid(s) "
-            f"(already bit-fit on Z-axis seams at requested radius): {', '.join(str(name) for name in no_fillet_needed_labels[:20])}"
+            f"(already bit-fit on the part-axis seams at requested radius): {', '.join(str(name) for name in no_fillet_needed_labels[:20])}"
         )
     if bitfit_unfit_total <= 0:
         print(
@@ -1503,6 +1646,7 @@ def fillet_for_cnc(
 
     # Recompute document to reflect changes
     doc.recompute()
+    return final_obj
 
 
 def prepare_for_inlay():
